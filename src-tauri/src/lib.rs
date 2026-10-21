@@ -91,7 +91,10 @@ fn serialized<T: serde::Serialize>(value: T) -> Result<Value> {
 }
 
 fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Result<Value> {
-    let mut lock = state.workspace.lock().map_err(|_| "Failed to lock the workspace state.")?;
+    let mut lock = state
+        .workspace
+        .lock()
+        .map_err(|_| "Failed to lock the workspace state.")?;
     match &request {
         Request::Startup => {
             let args: Vec<_> = std::env::args().collect();

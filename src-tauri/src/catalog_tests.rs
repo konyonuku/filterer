@@ -118,7 +118,9 @@ fn duplicate_names_in_same_batch_block_whole_plan() {
     ws.add_field("Category", "text").unwrap();
     let ids: Vec<_> = ws.videos().unwrap().iter().map(|v| v.id).collect();
     ws.set_values(&ids, 1, json!("Same category")).unwrap();
-    let plan = ws.plan(&ids, 1, "group", "Multiple", &HashMap::new()).unwrap();
+    let plan = ws
+        .plan(&ids, 1, "group", "Multiple", &HashMap::new())
+        .unwrap();
     assert!(!plan.errors.is_empty());
     assert!(ws
         .execute(&plan.id, true, &AtomicBool::new(false), &|_| {})
@@ -323,4 +325,18 @@ fn scan_3000_small_videos_and_updates_without_duplication() {
     assert_eq!(ws.videos().unwrap().len(), 3000);
     scan(&mut ws, &source);
     assert_eq!(ws.videos().unwrap().len(), 3000);
+}
+#[test]
+fn column_and_filter_order_persist_and_reject_invalid_values() {
+    let (_temp, ws, _source) = fixture();
+    assert!(ws.snapshot().unwrap().column_order.is_empty());
+    ws.set_setting("column_order", json!(["size", "1", "name"]))
+        .unwrap();
+    ws.set_setting("filter_order", json!(["2", "1"])).unwrap();
+    assert!(ws.set_setting("filter_order", json!("1,2")).is_err());
+    let root = ws.root.clone();
+    drop(ws);
+    let snapshot = Workspace::open(&root).unwrap().snapshot().unwrap();
+    assert_eq!(snapshot.column_order, ["size", "1", "name"]);
+    assert_eq!(snapshot.filter_order, ["2", "1"]);
 }

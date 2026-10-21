@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filename, matches, sortedVideos, text, type Video } from './model';
+import { filename, matches, moveKey, ordered, sortedVideos, text, type Video } from './model';
 
 const videos: Video[] = [
   { id: 1, path: 'C:\\Sources\\Dragön & 01.mp4', size: 50, values: { '1': ['Dragön', 'Adventure'], '2': 90, '3': '2025-03-01' }, images: [] },
@@ -29,5 +29,16 @@ describe('saved filter compatibility and list ordering', () => {
     expect(filename(videos[0].path)).toBe('Dragön & 01.mp4');
     expect(text(videos[0].values['1'])).toBe('Dragön, Adventure');
     expect(text(null)).toBe('');
+  });
+});
+describe('column and filter ordering', () => {
+  it('applies a saved order, drops removed keys and appends new ones', () => {
+    expect(ordered(['name', '1', '2', 'size'], ['size', '9', '2', 'size'])).toEqual(['size', '2', 'name', '1']);
+    expect(ordered(['1', '2'])).toEqual(['1', '2']);
+  });
+  it('moves a dragged key onto the drop target in both directions', () => {
+    expect(moveKey(['a', 'b', 'c', 'd'], 'a', 'c')).toEqual(['b', 'c', 'a', 'd']);
+    expect(moveKey(['a', 'b', 'c', 'd'], 'd', 'b')).toEqual(['a', 'd', 'b', 'c']);
+    expect(moveKey(['a', 'b'], 'a', 'x')).toEqual(['a', 'b']);
   });
 });

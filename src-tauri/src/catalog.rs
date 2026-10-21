@@ -143,6 +143,8 @@ pub struct Snapshot {
     pub history: Vec<History>,
     pub player: String,
     pub playlist_format: String,
+    pub column_order: Vec<String>,
+    pub filter_order: Vec<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MoveItem {
@@ -356,6 +358,8 @@ impl Workspace {
                 .as_str()
                 .unwrap_or("m3u8")
                 .into(),
+            column_order: serde_json::from_value(self.setting("column_order")?).unwrap_or_default(),
+            filter_order: serde_json::from_value(self.setting("filter_order")?).unwrap_or_default(),
         })
     }
     pub fn add_source(&self, path: &Path, recursive: bool) -> Result<()> {
@@ -497,8 +501,12 @@ impl Workspace {
             .unwrap_or(Ok(Value::Null))
     }
     pub fn set_setting(&self, key: &str, value: Value) -> Result<()> {
-        if !["player", "playlist_format"].contains(&key) {
+        if !["player", "playlist_format", "column_order", "filter_order"].contains(&key) {
             return Err("Unsupported setting.".into());
+        }
+        if key.ends_with("_order") && serde_json::from_value::<Vec<String>>(value.clone()).is_err()
+        {
+            return Err("The order must be a list of names.".into());
         }
         self.db
             .execute(
@@ -627,7 +635,9 @@ impl Workspace {
             return Err("Select the field to organize by.".into());
         }
         if self.has_pending()? {
-            return Err("There are interrupted move records to review. Open the move history.".into());
+            return Err(
+                "There are interrupted move records to review. Open the move history.".into(),
+            );
         }
         let records = self.videos()?;
         let mut plan = MovePlan {
@@ -664,7 +674,10 @@ impl Workspace {
                     }
                     group.into()
                 } else {
-                    values.first().cloned().unwrap_or_else(|| "Unclassified".into())
+                    values
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Unclassified".into())
                 };
                 folder_name(&category)?;
                 let destination = self.root.join("videos").join(category);
@@ -685,15 +698,24 @@ impl Workspace {
                     }
                     let key = path_text(&target).to_lowercase();
                     if target.exists() || targets.contains(&key) {
-                        return Err(format!("Destination file name conflict: {}", target.display()));
+                        return Err(format!(
+                            "Destination file name conflict: {}",
+                            target.display()
+                        ));
                     }
                     if sources.contains(&source) {
-                        return Err(format!("File shared by multiple videos: {}", source.display()));
+                        return Err(format!(
+                            "File shared by multiple videos: {}",
+                            source.display()
+                        ));
                     }
                     for table in ["images", "attachments"] {
                         let shared: bool = self.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE path=?1 AND media_id<>?2)"), params![path_text(&source), id], |r| r.get(0)).readable()?;
                         if shared {
-                            return Err(format!("File shared with another video: {}", source.display()));
+                            return Err(format!(
+                                "File shared with another video: {}",
+                                source.display()
+                            ));
                         }
                     }
                     let cross = volume_id(&source)? != volume_id(nearest_existing(&destination)?)?;
@@ -778,7 +800,8 @@ impl Workspace {
                 }
                 cancelled(cancel)?;
                 let item = plan.items[i].clone();
-                fs::create_dir_all(item.target.parent().ok_or("Invalid destination path")?).readable()?;
+                fs::create_dir_all(item.target.parent().ok_or("Invalid destination path")?)
+                    .readable()?;
                 self.check_destination(item.target.parent().unwrap())?;
                 let cross = volume_id(&item.source)? != volume_id(item.target.parent().unwrap())?;
                 if cross && !cross_confirmed {
@@ -878,7 +901,8 @@ impl Workspace {
             .filter(|r| r.status == "attention")
         {
             let mut plan: MovePlan = serde_json::from_value(record.payload).map_err(|_| {
-                "This move record uses an unsupported legacy format and cannot be recovered.".to_string()
+                "This move record uses an unsupported legacy format and cannot be recovered."
+                    .to_string()
             })?;
             for i in 0..plan.items.len() {
                 let item = plan.items[i].clone();
@@ -928,8 +952,9 @@ impl Workspace {
             .into_iter()
             .find(|r| r.id == id && r.status == "stopped")
             .ok_or("No interrupted record found to retry.")?;
-        let plan: MovePlan = serde_json::from_value(record.payload)
-            .map_err(|_| "This move record uses an unsupported legacy format and cannot be retried.".to_string())?;
+        let plan: MovePlan = serde_json::from_value(record.payload).map_err(|_| {
+            "This move record uses an unsupported legacy format and cannot be retried.".to_string()
+        })?;
         self.preview = Some(plan.clone());
         Ok(plan)
     }
@@ -1047,7 +1072,9 @@ fn folder_name(name: &str) -> Result<()> {
     let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&base.as_str())
         || (1..=9).any(|i| base == format!("COM{i}") || base == format!("LPT{i}"));
     if bad || reserved {
-        Err(format!("This value cannot be used as a folder name: {name}"))
+        Err(format!(
+            "This value cannot be used as a folder name: {name}"
+        ))
     } else {
         Ok(())
     }

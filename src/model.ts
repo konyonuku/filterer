@@ -9,7 +9,21 @@ export type History = { id: string; created: string; status: string; payload: { 
 export type Snapshot = {
   root: string; fields: Field[]; videos: Video[]; folders: { name: string; query: Query }[];
   sources: { path: string; recursive: boolean }[]; history: History[]; player: string; playlist_format: string;
+  column_order: string[]; filter_order: string[];
 };
+/** Applies a saved order to the current keys: unknown saved keys are dropped, new keys keep their default position at the end. */
+export function ordered(keys: string[], saved: string[] = []): string[] {
+  const known = saved.filter((key, i) => keys.includes(key) && saved.indexOf(key) === i);
+  return [...known, ...keys.filter(key => !known.includes(key))];
+}
+/** Moves `from` to the position of `to`, as when dropping a dragged item onto another one. */
+export function moveKey(keys: string[], from: string, to: string): string[] {
+  const start = keys.indexOf(from), end = keys.indexOf(to);
+  if (start < 0 || end < 0 || start === end) return keys;
+  const next = keys.filter(key => key !== from);
+  next.splice(end, 0, from);
+  return next;
+}
 export const filename = (path: string) => path.split(/[\\/]/).pop() || path;
 export function text(value: unknown): string {
   if (value == null) return '';

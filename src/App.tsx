@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
 import { cancel, chooseFile, chooseFolder, desktop, request } from './bridge';
-import { filename, size, sortedVideos, text, type Field, type ImageRef, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
+import { filename, moveKey, ordered, size, sortedVideos, text, type Field, type ImageRef, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
 
 type Panel = null | 'sources' | 'field' | 'edit' | 'move' | 'settings' | 'history' | 'save' | 'detail';
 const kinds = { text: 'Text', number: 'Number', date: 'Date', tags: 'Tags · multiple values' };
@@ -92,6 +92,8 @@ export default function App() {
   const [detailId, setDetailId] = useState<number | null>(null);
   const [detailImage, setDetailImage] = useState(0);
   const [comparisons, setComparisons] = useState<Record<string, Rule['op']>>({});
+  const [drag, setDrag] = useState<{ kind: 'column' | 'filter'; key: string } | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
   const anchor = useRef<number | null>(null);
   const pageSize = 100;
 
@@ -123,9 +125,37 @@ export default function App() {
   const pageRows = rows.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const chosen = rows.filter(r => selected.has(r.id));
   const detail = data?.videos.find(v => v.id === detailId);
-  const filterFields = data?.fields.slice(0, allFilters ? undefined : 6) || [];
-  const visibleFields = data?.fields.slice(0, 6) || [];
+  const fieldsById = new Map((data?.fields || []).map(f => [String(f.id), f]));
+  const filterOrder = ordered([...fieldsById.keys()], data?.filter_order);
+  const filterFields = filterOrder.map(key => fieldsById.get(key)!).slice(0, allFilters ? undefined : 6);
+  const columnOrder = ordered(['name', ...fieldsById.keys(), 'size'], data?.column_order);
+  let shownFieldColumns = 0;
+  const columns = columnOrder.filter(key => key === 'name' || key === 'size' || shownFieldColumns++ < 6);
   const activeRules = query.rules || [];
+  function saveOrder(setting: 'column_order' | 'filter_order', order: string[]) {
+    setData(previous => previous && { ...previous, [setting]: order });
+    request({ action: 'setting', key: setting, value: order }).catch(e => setError(String(e)));
+  }
+  function dragSource(kind: 'column' | 'filter', key: string) {
+    return {
+      draggable: !busy,
+      title: 'Drag to reorder',
+      onDragStart: (e: DragEvent) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', key); setDrag({ kind, key }); },
+      onDragEnd: () => { setDrag(null); setDragOver(null); },
+    };
+  }
+  function dropTarget(kind: 'column' | 'filter', key: string) {
+    const setting = kind === 'column' ? 'column_order' : 'filter_order';
+    return {
+      onDragOver: (e: DragEvent) => { if (drag?.kind !== kind) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragOver(key); },
+      onDrop: (e: DragEvent) => {
+        e.preventDefault();
+        if (drag?.kind === kind && drag.key !== key) saveOrder(setting, moveKey(kind === 'column' ? columnOrder : filterOrder, drag.key, key));
+        setDrag(null); setDragOver(null);
+      },
+    };
+  }
+  const dragClass = (kind: 'column' | 'filter', key: string) => drag?.kind !== kind ? '' : drag.key === key ? ' dragging' : dragOver === key ? ' drag-over' : '';
   const changeQuery = (q: Query) => { setQuery(q); setPage(0); setSelected(new Set()); setPreset(''); };
   const setRule = (field: Field, rule: Rule | null) => changeQuery({ ...query, rules: [...activeRules.filter(r => String(r.field) !== String(field.id)), ...(rule ? [rule] : [])] });
   const close = () => { if (!busy) setPanel(null); };
@@ -221,7 +251,7 @@ export default function App() {
             const rule = activeRules.find(r => String(r.field) === String(field.id));
             const numeric = field.kind === 'number' || field.kind === 'date';
             const values = [...new Set(data.videos.flatMap(v => { const value = v.values[String(field.id)]; return Array.isArray(value) ? value.map(text) : value == null ? [] : [text(value)]; }))].sort((a, b) => a.localeCompare(b));
-            return <div className={`filter-cell ${rule ? 'filter-active' : ''}`} key={field.id}><label htmlFor={`filter-${field.id}`}>{field.name}{rule && <i />}</label>
+            return <div className={`filter-cell ${rule ? 'filter-active' : ''}${dragClass('filter', String(field.id))}`} key={field.id} {...dropTarget('filter', String(field.id))}><label htmlFor={`filter-${field.id}`} {...dragSource('filter', String(field.id))}><GripVertical size={11} className="grip" />{field.name}{rule && <i />}</label>
               {numeric ? <div className="numeric-filter"><select aria-label={`${field.name} comparison`} value={rule?.op || comparisons[String(field.id)] || 'gte'} onChange={e => { const op = e.target.value as Rule['op']; setComparisons({ ...comparisons, [String(field.id)]: op }); setRule(field, op === 'empty' || rule?.value != null && rule.value !== '' ? { field: String(field.id), op, value: rule?.value } : null); }}><option value="gte">At least</option><option value="lte">At most</option><option value="eq">Equals</option><option value="empty">Empty</option></select>
                 <input id={`filter-${field.id}`} aria-label={`${field.name} filter`} disabled={rule?.op === 'empty'} placeholder="Any" type={field.kind === 'date' ? 'date' : 'number'} value={rule?.op === 'empty' ? '' : text(rule?.value)} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: rule?.op || comparisons[String(field.id)] || 'gte', value: field.kind === 'number' ? Number(e.target.value) : e.target.value } : null)} />{rule && <button className="clear-inline" aria-label={`Clear ${field.name} filter`} onClick={() => setRule(field, null)}><X size={12} /></button>}</div>
                 : <select id={`filter-${field.id}`} aria-label={`${field.name} filter`} value={rule ? rule.op === 'empty' ? 'empty' : `v:${text(rule.value)}` : ''} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: e.target.value === 'empty' ? 'empty' : 'eq', value: e.target.value.slice(2) } : null)}><option value="">Any</option><option value="empty">Empty</option>{values.map(v => <option key={v} value={`v:${v}`}>{v}</option>)}</select>}
@@ -243,9 +273,18 @@ export default function App() {
           <button className="primary" disabled={busy} onClick={() => openPanel('move')}><FolderOpen size={14} />Organize folders</button>
         </div></div>}
 
-        {view === 'list' ? <div className="table-container"><table><thead><tr><th className="checkbox-col"><input type="checkbox" aria-label="Select all on this page" checked={pageRows.length > 0 && pageRows.every(v => selected.has(v.id))} onChange={e => setSelected(prev => { const next = new Set(prev); pageRows.forEach(v => e.target.checked ? next.add(v.id) : next.delete(v.id)); return next; })} /></th><th className="number-col">No.</th><th className="filename-col"><button onClick={() => sortBy('name')}>File name{sortIcon('name')}</button></th>{visibleFields.map(f => <th key={f.id} className={f.kind === 'number' ? 'numeric' : ''}><button onClick={() => sortBy(String(f.id))}>{f.name}{sortIcon(String(f.id))}</button></th>)}<th className="numeric"><button onClick={() => sortBy('size')}>Size{sortIcon('size')}</button></th><th className="actions-col" /></tr></thead>
-          <tbody>{pageRows.map((video, i) => <tr key={video.id} className={selected.has(video.id) ? 'row-selected' : ''} onClick={e => toggleSelection(video, e.shiftKey)} onDoubleClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}>
-            <td><input type="checkbox" aria-label={`Select ${filename(video.path)}`} checked={selected.has(video.id)} onChange={() => toggleSelection(video)} onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} /></td><td className="row-number">{currentPage * pageSize + i + 1}</td><td className="filename-cell" title={video.path}><span><FileVideo size={14} /><strong>{filename(video.path)}</strong></span></td>{visibleFields.map(f => <td key={f.id} className={f.kind === 'number' ? 'numeric score-cell' : ''} title={text(video.values[String(f.id)])}>{Array.isArray(video.values[String(f.id)]) ? <span className="tag-list">{(video.values[String(f.id)] as unknown[]).slice(0, 2).map((v, n) => <span className="tag-chip" key={n}>{text(v)}</span>)}{(video.values[String(f.id)] as unknown[]).length > 2 && <small>+{(video.values[String(f.id)] as unknown[]).length - 2}</small>}</span> : text(video.values[String(f.id)]) || <span className="empty-value">—</span>}</td>)}<td className="numeric size-cell">{size(video.size)}</td><td><button className="icon-button row-detail" aria-label={`Details for ${filename(video.path)}`} onDoubleClick={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setDetailId(video.id); setDetailImage(0); setPanel('detail'); }}><MoreHorizontal size={17} /></button></td>
+        {view === 'list' ? <div className="table-container"><table><thead><tr><th className="checkbox-col"><input type="checkbox" aria-label="Select all on this page" checked={pageRows.length > 0 && pageRows.every(v => selected.has(v.id))} onChange={e => setSelected(prev => { const next = new Set(prev); pageRows.forEach(v => e.target.checked ? next.add(v.id) : next.delete(v.id)); return next; })} /></th>{columns.map(key => {
+            const field = fieldsById.get(key);
+            const className = key === 'name' ? 'filename-col' : key === 'size' || field?.kind === 'number' ? 'numeric' : '';
+            return <th key={key} className={`draggable-col ${className}${dragClass('column', key)}`} {...dragSource('column', key)} {...dropTarget('column', key)}><button onClick={() => sortBy(key)}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button></th>;
+          })}<th className="actions-col" /></tr></thead>
+          <tbody>{pageRows.map(video => <tr key={video.id} className={selected.has(video.id) ? 'row-selected' : ''} onClick={e => toggleSelection(video, e.shiftKey)} onDoubleClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}>
+            <td><input type="checkbox" aria-label={`Select ${filename(video.path)}`} checked={selected.has(video.id)} onChange={() => toggleSelection(video)} onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} /></td>{columns.map(key => {
+              if (key === 'name') return <td key={key} className="filename-cell" title={video.path}><span><FileVideo size={14} /><strong>{filename(video.path)}</strong></span></td>;
+              if (key === 'size') return <td key={key} className="numeric size-cell">{size(video.size)}</td>;
+              const value = video.values[key];
+              return <td key={key} className={fieldsById.get(key)?.kind === 'number' ? 'numeric score-cell' : ''} title={text(value)}>{Array.isArray(value) ? <span className="tag-list">{value.slice(0, 2).map((v, n) => <span className="tag-chip" key={n}>{text(v)}</span>)}{value.length > 2 && <small>+{value.length - 2}</small>}</span> : text(value) || <span className="empty-value">—</span>}</td>;
+            })}<td><button className="icon-button row-detail" aria-label={`Details for ${filename(video.path)}`} onDoubleClick={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setDetailId(video.id); setDetailImage(0); setPanel('detail'); }}><MoreHorizontal size={17} /></button></td>
           </tr>)}</tbody></table></div>
           : <div className="gallery">{pageRows.map(video => <div className={`gallery-card ${selected.has(video.id) ? 'card-selected' : ''}`} key={video.id}>
             <button className="cover-button" aria-label={`Details for ${filename(video.path)}`} onClick={() => { setDetailId(video.id); setDetailImage(0); setPanel('detail'); }}><Cover image={video.images.find(i => i.cover)} workspace={data.root} /></button>
