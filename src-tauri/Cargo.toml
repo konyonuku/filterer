@@ -1,0 +1,31 @@
+[package]
+name = "filterer-desktop"
+version = "0.2.0"
+description = "Workspace-based local video explorer"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "filterer_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+fs2 = "0.4"
+walkdir = "2"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+base64 = "0.22"
+url = "2"
+libc = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"

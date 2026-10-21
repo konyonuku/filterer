@@ -1,0 +1,40 @@
+# --- Node.js / Frontend (Vite, TypeScript) ---
+node_modules/
+dist/
+*.tsbuildinfo
+
+# --- Rust / Tauri ---
+src-tauri/target/
+src-tauri/gen/
+
+# --- Desktop build output (tools/stage-desktop.mjs) ---
+.desktop-build/
+
+# --- Test results ---
+test-results/
+playwright-report/
+
+# --- App runtime data (workspace DB, playlists) ---
+.video-workspace/
+
+# --- Logs ---
+*.log
+
+# --- AI agent instructions and settings ---
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+.claude/
+.codex/
+.gemini/
+.cursor/
+.cursorrules
+.windsurf/
+.windsurfrules
+.aider*
+.github/copilot-instructions.md
+
+# --- Planning research and project docs (local only) ---
+research/
+docs/
