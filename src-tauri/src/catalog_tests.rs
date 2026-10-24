@@ -420,3 +420,12 @@ fn column_widths_are_validated_and_returned() {
     ws.set_setting("column_widths", json!({})).unwrap();
     assert!(ws.snapshot().unwrap().column_widths.is_empty());
 }
+
+#[test]
+fn hidden_columns_are_a_list_of_names() {
+    let (_temp, ws, _source) = fixture();
+    assert!(ws.snapshot().unwrap().hidden_columns.is_empty());
+    assert!(ws.set_setting("hidden_columns", json!({"size": true})).is_err());
+    ws.set_setting("hidden_columns", json!(["size", "3"])).unwrap();
+    assert_eq!(ws.snapshot().unwrap().hidden_columns, vec!["size", "3"]);
+}

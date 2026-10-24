@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, Eye, EyeOff, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
 import { cancel, chooseFile, chooseFolder, desktop, request } from './bridge';
 import { filename, moveKey, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
 
@@ -170,6 +170,9 @@ export default function App() {
   const [dragOver, setDragOver] = useState<string | null>(null);
   const anchor = useRef<number | null>(null);
   const tableRef = useRef<HTMLTableElement>(null);
+  const [columnSelection, setColumnSelection] = useState<string[]>([]);
+  const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; keys: string[] } | null>(null);
+  const [unhide, setUnhide] = useState<{ x: number; y: number; chosen: string[] } | null>(null);
   const resizing = useRef(false);
   const [editing, setEditing] = useState<{ id: number; field: string; original: string } | null>(null);
   const editingRef = useRef(editing);
@@ -228,7 +231,12 @@ export default function App() {
   const filterFields = filterOrder.map(key => fieldsById.get(key)!).slice(0, allFilters ? undefined : visibleFields);
   const columnOrder = ordered(['name', ...fieldsById.keys(), 'size'], data?.column_order);
   let shownFieldColumns = 0;
-  const columns = columnOrder.filter(key => key === 'name' || key === 'size' || shownFieldColumns++ < visibleFields);
+  // Hidden columns keep their order and width settings, so showing them again restores both.
+  const hiddenColumns = data?.hidden_columns || [];
+  const shownColumns = columnOrder.filter(key => key === 'name' || key === 'size' || shownFieldColumns++ < visibleFields);
+  const columns = shownColumns.filter(key => !hiddenColumns.includes(key));
+  const hiddenShown = shownColumns.filter(key => hiddenColumns.includes(key));
+  const columnLabel = (key: string) => key === 'name' ? 'File name' : key === 'size' ? 'Size' : fieldsById.get(key)?.name || key;
   const activeRules = query.rules || [];
   // Until a column is resized the table fills the width; afterwards every column uses an exact pixel width.
   const customWidths = Object.keys(data?.column_widths || {}).length > 0;
@@ -305,6 +313,23 @@ export default function App() {
     widths[key] = field?.kind === 'rating' ? ratingFitWidth : Math.min(2000, Math.max(minWidth(key), Math.ceil(widest + 20 + 8)));
     apply();
     saveWidths(widths);
+  }
+  function saveHidden(hidden: string[]) {
+    const next = [...new Set(hidden)];
+    setData(previous => previous && { ...previous, hidden_columns: next });
+    request({ action: 'setting', key: 'hidden_columns', value: next }).catch(e => setError(String(e)));
+  }
+  function openColumnMenu(e: MouseEvent) {
+    e.preventDefault();
+    const key = (e.target as Element).closest<HTMLElement>('th[data-col]')?.dataset.col;
+    const keys = key ? (columnSelection.includes(key) ? columnSelection : [key]) : columnSelection;
+    if (key && !columnSelection.includes(key)) setColumnSelection([key]);
+    setUnhide(null);
+    setColumnMenu({ x: Math.min(e.clientX, window.innerWidth - 240), y: Math.min(e.clientY, window.innerHeight - 150), keys });
+  }
+  function hideColumns(keys: string[]) {
+    saveHidden([...hiddenColumns, ...keys]);
+    setColumnSelection([]); setColumnMenu(null);
   }
   function saveOrder(setting: 'column_order' | 'filter_order', order: string[]) {
     setData(previous => previous && { ...previous, [setting]: order });
@@ -393,6 +418,16 @@ export default function App() {
       <button className="top-button" disabled={busy} onClick={() => void openWorkspace()}><FolderOpen size={15} />{data ? 'Change workspace' : 'Open workspace'}</button>
     </header>
 
+    {columnMenu && <><div className="menu-dismiss" onClick={() => setColumnMenu(null)} onContextMenu={e => { e.preventDefault(); setColumnMenu(null); }} /><div className="dropdown-menu context-menu" role="menu" style={{ left: columnMenu.x, top: columnMenu.y }}>
+      {(() => { const keys = columnMenu.keys; return <button role="menuitem" disabled={!keys.length} onClick={() => hideColumns(keys)}><EyeOff size={15} />{keys.length > 1 ? `Hide ${keys.length} columns` : keys.length ? `Hide “${columnLabel(keys[0])}”` : 'Hide column'}</button>; })()}
+      <button role="menuitem" disabled={!hiddenShown.length} onClick={() => { saveHidden([]); setColumnMenu(null); }}><Eye size={15} />Show all hidden columns{hiddenShown.length ? ` (${hiddenShown.length})` : ''}</button>
+      <button role="menuitem" disabled={!hiddenShown.length} onClick={() => { setUnhide({ x: columnMenu.x, y: columnMenu.y, chosen: [] }); setColumnMenu(null); }}><Eye size={15} />Show hidden columns…</button>
+    </div></>}
+    {unhide && <><div className="menu-dismiss" onClick={() => setUnhide(null)} /><div className="tag-panel unhide-panel" role="dialog" aria-label="Show hidden columns" style={{ left: Math.min(unhide.x, window.innerWidth - 300), top: unhide.y }} onKeyDown={e => { if (e.key === 'Escape') setUnhide(null); }}>
+      <strong className="unhide-title">Hidden columns</strong>
+      <div className="tag-options">{hiddenShown.map(key => { const on = unhide.chosen.includes(key); return <button key={key} type="button" autoFocus={key === hiddenShown[0]} className={`tag-option${on ? ' state-all' : ''}`} aria-pressed={on} onClick={() => setUnhide({ ...unhide, chosen: on ? unhide.chosen.filter(k => k !== key) : [...unhide.chosen, key] })}><span className="tag-name">{columnLabel(key)}</span></button>; })}</div>
+      <div className="tag-panel-footer"><span>{unhide.chosen.length} selected</span><button type="button" className="text-button muted" onClick={() => setUnhide(null)}>Cancel</button><button type="button" className="primary unhide-ok" disabled={!unhide.chosen.length} onClick={() => { saveHidden(hiddenColumns.filter(k => !unhide.chosen.includes(k))); setUnhide(null); }}>OK</button></div>
+    </div></>}
     {error && <div className="notice error" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
 
     {!data ? <main className="welcome">
@@ -451,10 +486,13 @@ export default function App() {
           <button className="primary" disabled={busy} onClick={() => openPanel('move')}><FolderOpen size={14} />Organize folders</button>
         </div></div>}
 
-        {view === 'list' ? <div className="table-container"><table ref={tableRef} style={customWidths ? { width: tableWidth } : undefined}><thead><tr><th className="checkbox-col"><input type="checkbox" aria-label="Select all on this page" checked={pageRows.length > 0 && pageRows.every(v => selected.has(v.id))} onChange={e => setSelected(prev => { const next = new Set(prev); pageRows.forEach(v => e.target.checked ? next.add(v.id) : next.delete(v.id)); return next; })} /></th>{columns.map(key => {
+        {view === 'list' ? <div className="table-container"><table ref={tableRef} style={customWidths ? { width: tableWidth } : undefined}><thead onContextMenu={openColumnMenu}><tr><th className="checkbox-col"><input type="checkbox" aria-label="Select all on this page" checked={pageRows.length > 0 && pageRows.every(v => selected.has(v.id))} onChange={e => setSelected(prev => { const next = new Set(prev); pageRows.forEach(v => e.target.checked ? next.add(v.id) : next.delete(v.id)); return next; })} /></th>{columns.map(key => {
             const field = fieldsById.get(key);
             const className = key === 'name' ? 'filename-col' : key === 'size' || field?.kind === 'number' ? 'numeric' : '';
-            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}`} {...dragSource('column', key)} {...dropTarget('column', key)}><button onClick={() => sortBy(key)}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
+            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}${columnSelection.includes(key) ? ' col-selected' : ''}`} {...dragSource('column', key)} {...dropTarget('column', key)}><button title="Click to sort · Ctrl+click to select · Right-click for options" onClick={e => {
+              if (e.ctrlKey || e.metaKey) { setColumnSelection(columnSelection.includes(key) ? columnSelection.filter(k => k !== key) : [...columnSelection, key]); return; }
+              setColumnSelection([]); sortBy(key);
+            }}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
           })}<th className="actions-col" /></tr></thead>
           <tbody>{pageRows.map(video => <tr key={video.id} className={selected.has(video.id) ? 'row-selected' : ''} onClick={e => toggleSelection(video, e.shiftKey)} onDoubleClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}>
             <td><input type="checkbox" aria-label={`Select ${filename(video.path)}`} checked={selected.has(video.id)} onChange={() => toggleSelection(video)} onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} /></td>{columns.map(key => {
@@ -493,7 +531,7 @@ export default function App() {
             <label className="card-title"><input type="checkbox" checked={selected.has(video.id)} onChange={() => toggleSelection(video)} /> <span title={video.path}>{filename(video.path)}</span></label><div className="card-meta"><span>{size(video.size)}</span><button className="text-button" disabled={busy} onClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}><Play size={12} />Play</button></div>
           </div>)}</div>}
         {!rows.length && <div className="empty-results">{data.videos.length ? <><Search size={28} /><h3>No videos match these conditions</h3><p>Try changing the filters or search terms.</p><button onClick={() => changeQuery({ search: '', rules: [], mode: 'AND' })}>Reset conditions</button></> : <><FolderPlus size={30} /><h3>Add your first source folder</h3><p>Videos in the folder will be loaded.</p><button className="primary" onClick={() => openPanel('sources')}>Add folder</button></>}</div>}
-        <footer className="table-footer"><span>{selected.size ? `${selected.size} selected · ` : ''}{pageSize} per page<span className="footer-tip">Double-click to play · Shift-click to select a range · Click a field of a selected row to edit</span></span><div><button className="icon-button" aria-label="Previous page" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}><ChevronLeft size={16} /></button><strong>{currentPage + 1}</strong><span>/ {pages}</span><button className="icon-button" aria-label="Next page" disabled={currentPage + 1 >= pages} onClick={() => setPage(currentPage + 1)}><ChevronRight size={16} /></button></div></footer>
+        <footer className="table-footer"><span>{selected.size ? `${selected.size} selected · ` : ''}{pageSize} per page<span className="footer-tip">Double-click to play · Shift-click to select a range · Click a field of a selected row to edit · Right-click a column header to hide columns</span></span><div><button className="icon-button" aria-label="Previous page" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}><ChevronLeft size={16} /></button><strong>{currentPage + 1}</strong><span>/ {pages}</span><button className="icon-button" aria-label="Next page" disabled={currentPage + 1 >= pages} onClick={() => setPage(currentPage + 1)}><ChevronRight size={16} /></button></div></footer>
       </section>
       <div className="explorer-note"><CircleHelp size={13} /><span>Filters only change the visible list. Actual file moves run from ‘Organize folders’.</span></div>
     </main>}

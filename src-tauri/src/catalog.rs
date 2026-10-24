@@ -146,6 +146,7 @@ pub struct Snapshot {
     pub column_order: Vec<String>,
     pub filter_order: Vec<String>,
     pub column_widths: HashMap<String, f64>,
+    pub hidden_columns: Vec<String>,
     pub options: Options,
 }
 pub const PAGE_SIZES: &[u32] = &[25, 50, 100, 200, 500];
@@ -381,6 +382,7 @@ impl Workspace {
             column_order: serde_json::from_value(self.setting("column_order")?).unwrap_or_default(),
             filter_order: serde_json::from_value(self.setting("filter_order")?).unwrap_or_default(),
             column_widths: serde_json::from_value(self.setting("column_widths")?).unwrap_or_default(),
+            hidden_columns: serde_json::from_value(self.setting("hidden_columns")?).unwrap_or_default(),
             options: self.options()?,
         })
     }
@@ -523,10 +525,11 @@ impl Workspace {
             .unwrap_or(Ok(Value::Null))
     }
     pub fn set_setting(&self, key: &str, value: Value) -> Result<()> {
-        if !["player", "playlist_format", "column_order", "filter_order", "column_widths"].contains(&key) {
+        if !["player", "playlist_format", "column_order", "filter_order", "column_widths", "hidden_columns"].contains(&key) {
             return Err("Unsupported setting.".into());
         }
-        if key.ends_with("_order") && serde_json::from_value::<Vec<String>>(value.clone()).is_err()
+        if (key.ends_with("_order") || key == "hidden_columns")
+            && serde_json::from_value::<Vec<String>>(value.clone()).is_err()
         {
             return Err("The order must be a list of names.".into());
         }
