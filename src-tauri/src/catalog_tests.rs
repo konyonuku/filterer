@@ -379,3 +379,44 @@ fn options_default_validate_and_rename_unclassified_folder() {
     let plan = preview(&mut ws, id, field);
     assert_eq!(plan.items[0].target, ws.root.join("videos").join("No value").join("plain.mp4"));
 }
+
+#[test]
+fn rating_accepts_half_steps_and_keeps_unrated_apart_from_zero() {
+    let (_temp, mut ws, source) = fixture();
+    write(&source.join("a.mp4"));
+    write(&source.join("b.mp4"));
+    scan(&mut ws, &source);
+    ws.add_field("Stars", "rating").unwrap();
+    let field = ws.fields().unwrap()[0].id;
+    let ids: Vec<i64> = ws.videos().unwrap().iter().map(|v| v.id).collect();
+    for ok in ["0", "0.5", "3.5", "5", "4.0"] {
+        ws.set_values(&ids[..1], field, json!(ok)).unwrap();
+    }
+    ws.set_values(&ids[..1], field, json!(4.5)).unwrap();
+    for bad in ["-0.5", "5.5", "3.2", "abc", "NaN", "inf"] {
+        assert!(ws.set_values(&ids[..1], field, json!(bad)).is_err(), "{bad}");
+    }
+    ws.set_values(&ids[1..], field, json!("0")).unwrap();
+    let videos = ws.videos().unwrap();
+    let value = |id: i64| videos.iter().find(|v| v.id == id).unwrap().values.get(&field.to_string()).cloned();
+    assert_eq!(value(ids[0]), Some(json!(4.5)));
+    assert_eq!(value(ids[1]), Some(json!(0.0)));
+    ws.set_values(&ids[1..], field, json!("")).unwrap();
+    let videos = ws.videos().unwrap();
+    let cleared = videos.iter().find(|v| v.id == ids[1]).unwrap().values.get(&field.to_string()).cloned();
+    assert!(matches!(cleared, None | Some(Value::Null)));
+}
+
+#[test]
+fn column_widths_are_validated_and_returned() {
+    let (_temp, ws, _source) = fixture();
+    assert!(ws.snapshot().unwrap().column_widths.is_empty());
+    assert!(ws.set_setting("column_widths", json!({"name": 10})).is_err());
+    assert!(ws.set_setting("column_widths", json!({"name": "wide"})).is_err());
+    assert!(ws.set_setting("column_widths", json!(["name"])).is_err());
+    ws.set_setting("column_widths", json!({"name": 320, "size": 90.5})).unwrap();
+    let widths = ws.snapshot().unwrap().column_widths;
+    assert_eq!((widths["name"], widths["size"]), (320.0, 90.5));
+    ws.set_setting("column_widths", json!({})).unwrap();
+    assert!(ws.snapshot().unwrap().column_widths.is_empty());
+}

@@ -1,4 +1,7 @@
-export type Field = { id: number; name: string; kind: 'text' | 'number' | 'date' | 'tags' };
+export type Field = { id: number; name: string; kind: 'text' | 'number' | 'date' | 'tags' | 'rating' };
+/** Star ratings run from 0 to 5 in half steps; a missing value means "not rated", not 0. */
+export const ratingSteps = Array.from({ length: 11 }, (_, i) => i / 2);
+export const ratingText = (value: unknown) => typeof value === 'number' ? `${value} / 5` : 'Not rated';
 export type ImageRef = { id: number; path: string; cover: boolean };
 export type Video = { id: number; path: string; size: number; values: Record<string, unknown>; images: ImageRef[] };
 export type Rule = { field: string; op: 'eq' | 'contains' | 'gte' | 'lte' | 'empty'; value?: unknown };
@@ -9,7 +12,7 @@ export type History = { id: string; created: string; status: string; payload: { 
 export type Snapshot = {
   root: string; fields: Field[]; videos: Video[]; folders: { name: string; query: Query }[];
   sources: { path: string; recursive: boolean }[]; history: History[]; player: string; playlist_format: string;
-  column_order: string[]; filter_order: string[]; options: Options;
+  column_order: string[]; filter_order: string[]; column_widths: Record<string, number>; options: Options;
 };
 export type Options = { unclassified_folder: string; shared_folder: string; page_size: number; visible_fields: number };
 export const pageSizes = [25, 50, 100, 200, 500];

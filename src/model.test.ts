@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filename, matches, moveKey, ordered, sortedVideos, text, type Video } from './model';
+import { filename, matches, moveKey, ordered, ratingSteps, ratingText, sortedVideos, text, type Query, type Video } from './model';
 
 const videos: Video[] = [
   { id: 1, path: 'C:\\Sources\\Dragön & 01.mp4', size: 50, values: { '1': ['Dragön', 'Adventure'], '2': 90, '3': '2025-03-01' }, images: [] },
@@ -40,5 +40,25 @@ describe('column and filter ordering', () => {
     expect(moveKey(['a', 'b', 'c', 'd'], 'a', 'c')).toEqual(['b', 'c', 'a', 'd']);
     expect(moveKey(['a', 'b', 'c', 'd'], 'd', 'b')).toEqual(['a', 'd', 'b', 'c']);
     expect(moveKey(['a', 'b'], 'a', 'x')).toEqual(['a', 'b']);
+  });
+});
+describe('star ratings', () => {
+  const rated: Video[] = [
+    { id: 1, path: 'a.mp4', size: 1, values: { r: 4.5 }, images: [] },
+    { id: 2, path: 'b.mp4', size: 1, values: { r: 0 }, images: [] },
+    { id: 3, path: 'c.mp4', size: 1, values: {}, images: [] },
+  ];
+  const ids = (rules: Query['rules']) => sortedVideos(rated, { rules }, 'name', false).map(v => v.id);
+  it('keeps unrated apart from zero stars in filters', () => {
+    expect(ids([{ field: 'r', op: 'gte', value: 0 }])).toEqual([1, 2]);
+    expect(ids([{ field: 'r', op: 'eq', value: 0 }])).toEqual([2]);
+    expect(ids([{ field: 'r', op: 'lte', value: 4.5 }])).toEqual([1, 2]);
+    expect(ids([{ field: 'r', op: 'empty' }])).toEqual([3]);
+  });
+  it('sorts by rating with unrated last and describes values', () => {
+    expect(sortedVideos(rated, {}, 'r', true).map(v => v.id)).toEqual([1, 2, 3]);
+    expect(sortedVideos(rated, {}, 'r', false).map(v => v.id)).toEqual([2, 1, 3]);
+    expect(ratingSteps).toEqual([0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]);
+    expect([ratingText(0), ratingText(3.5), ratingText(undefined)]).toEqual(['0 / 5', '3.5 / 5', 'Not rated']);
   });
 });

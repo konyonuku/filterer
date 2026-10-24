@@ -1,4 +1,5 @@
 mod catalog;
+mod preferences;
 
 use catalog::{Result, Workspace};
 use serde::Deserialize;
@@ -13,10 +14,31 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
-#[derive(Default)]
 struct AppState {
     workspace: Arc<Mutex<Option<Workspace>>>,
     cancel: Arc<AtomicBool>,
+    /// App-wide preferences file; None when the OS config folder is unavailable.
+    preferences: Option<PathBuf>,
+}
+impl AppState {
+    fn preferences(&self) -> preferences::Preferences {
+        self.preferences
+            .as_deref()
+            .map(preferences::load)
+            .unwrap_or_default()
+    }
+    fn update_preferences(&self, change: impl FnOnce(&mut preferences::Preferences)) -> Result<()> {
+        let Some(path) = &self.preferences else {
+            return Ok(());
+        };
+        let mut current = preferences::load(path);
+        change(&mut current);
+        preferences::save(path, &current)
+    }
+    /// Failing to record the last workspace must not block opening it.
+    fn remember(&self, ws: &Workspace) {
+        let _ = self.update_preferences(|p| p.last_workspace = Some(ws.root.clone()));
+    }
 }
 
 #[derive(Deserialize)]
@@ -24,6 +46,7 @@ struct AppState {
 enum Request {
     Startup,
     Snapshot,
+    Preferences,
     Open {
         path: PathBuf,
     },
@@ -68,6 +91,10 @@ enum Request {
         column_order: Option<Vec<String>>,
         #[serde(default)]
         filter_order: Option<Vec<String>>,
+        #[serde(default)]
+        reopen_last: Option<bool>,
+        #[serde(default)]
+        column_widths: Option<Value>,
     },
     Plan {
         ids: Vec<i64>,
@@ -102,10 +129,32 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
         .map_err(|_| "Failed to lock the workspace state.")?;
     match &request {
         Request::Startup => {
-            let args: Vec<_> = std::env::args().collect();
-            if let Some(i) = args.iter().position(|a| a == "--workspace") {
-                if let Some(path) = args.get(i + 1) {
-                    *lock = Some(Workspace::open(Path::new(path))?);
+            if lock.is_none() {
+                let args: Vec<_> = std::env::args().collect();
+                let requested = args
+                    .iter()
+                    .position(|a| a == "--workspace")
+                    .and_then(|i| args.get(i + 1))
+                    .map(PathBuf::from);
+                if let Some(path) = requested {
+                    let ws = Workspace::open(&path)?;
+                    state.remember(&ws);
+                    *lock = Some(ws);
+                } else if let preferences::Preferences {
+                    reopen_last: true,
+                    last_workspace: Some(path),
+                } = state.preferences()
+                {
+                    if !path.is_dir() {
+                        return Err(format!(
+                            "The last workspace was not found: {}",
+                            path.display()
+                        ));
+                    }
+                    let ws = Workspace::open(&path).map_err(|e| {
+                        format!("Could not reopen the last workspace ({}): {e}", path.display())
+                    })?;
+                    *lock = Some(ws);
                 }
             }
             return match lock.as_ref() {
@@ -118,7 +167,12 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
             if lock.as_ref().map(|ws| &ws.root) != Some(&resolved) {
                 *lock = Some(Workspace::open(&resolved)?);
             }
-            return serialized(lock.as_ref().unwrap().snapshot()?);
+            let ws = lock.as_ref().unwrap();
+            state.remember(ws);
+            return serialized(ws.snapshot()?);
+        }
+        Request::Preferences => {
+            return Ok(json!({ "reopen_last": state.preferences().reopen_last }));
         }
         _ => {}
     }
@@ -149,6 +203,8 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
             options,
             column_order,
             filter_order,
+            reopen_last,
+            column_widths,
         } => {
             if !player.is_empty() && !Path::new(&player).is_file() {
                 return Err("Check the player executable.".into());
@@ -164,6 +220,12 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
             }
             if let Some(order) = filter_order {
                 ws.set_setting("filter_order", json!(order))?;
+            }
+            if let Some(widths) = column_widths {
+                ws.set_setting("column_widths", widths)?;
+            }
+            if let Some(reopen) = reopen_last {
+                state.update_preferences(|p| p.reopen_last = reopen)?;
             }
         }
         Request::Plan {
@@ -189,7 +251,7 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
             ws.play(&ids, playlist)?;
             return Ok(Value::Null);
         }
-        Request::Startup | Request::Open { .. } => unreachable!(),
+        Request::Startup | Request::Open { .. } | Request::Preferences => unreachable!(),
     }
     serialized(ws.snapshot()?)
 }
@@ -203,6 +265,7 @@ async fn catalog(
     let state = AppState {
         workspace: state.workspace.clone(),
         cancel: state.cancel.clone(),
+        preferences: state.preferences.clone(),
     };
     tauri::async_runtime::spawn_blocking(move || {
         operate(&state, request, &|message| {
@@ -221,9 +284,18 @@ fn cancel_operation(state: tauri::State<'_, AppState>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![catalog, cancel_operation])
         .setup(|app| {
+            let preferences = app
+                .path()
+                .app_config_dir()
+                .ok()
+                .map(|dir| dir.join("preferences.json"));
+            app.manage(AppState {
+                workspace: Arc::default(),
+                cancel: Arc::default(),
+                preferences,
+            });
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Filterer · Video Explorer");
             }

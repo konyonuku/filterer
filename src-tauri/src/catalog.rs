@@ -145,6 +145,7 @@ pub struct Snapshot {
     pub playlist_format: String,
     pub column_order: Vec<String>,
     pub filter_order: Vec<String>,
+    pub column_widths: HashMap<String, f64>,
     pub options: Options,
 }
 pub const PAGE_SIZES: &[u32] = &[25, 50, 100, 200, 500];
@@ -379,6 +380,7 @@ impl Workspace {
                 .into(),
             column_order: serde_json::from_value(self.setting("column_order")?).unwrap_or_default(),
             filter_order: serde_json::from_value(self.setting("filter_order")?).unwrap_or_default(),
+            column_widths: serde_json::from_value(self.setting("column_widths")?).unwrap_or_default(),
             options: self.options()?,
         })
     }
@@ -453,7 +455,7 @@ impl Workspace {
     pub fn add_field(&self, name: &str, kind: &str) -> Result<()> {
         if name.trim().is_empty()
             || name.chars().count() > 60
-            || !["text", "number", "date", "tags"].contains(&kind)
+            || !["text", "number", "date", "tags", "rating"].contains(&kind)
         {
             return Err("Check the field name and type.".into());
         }
@@ -521,12 +523,18 @@ impl Workspace {
             .unwrap_or(Ok(Value::Null))
     }
     pub fn set_setting(&self, key: &str, value: Value) -> Result<()> {
-        if !["player", "playlist_format", "column_order", "filter_order"].contains(&key) {
+        if !["player", "playlist_format", "column_order", "filter_order", "column_widths"].contains(&key) {
             return Err("Unsupported setting.".into());
         }
         if key.ends_with("_order") && serde_json::from_value::<Vec<String>>(value.clone()).is_err()
         {
             return Err("The order must be a list of names.".into());
+        }
+        if key == "column_widths"
+            && !serde_json::from_value::<HashMap<String, f64>>(value.clone())
+                .is_ok_and(|w| w.values().all(|v| (30.0..=2000.0).contains(v)))
+        {
+            return Err("Column widths must be between 30 and 2000 pixels.".into());
         }
         self.write_setting(key, value)
     }
@@ -1092,6 +1100,14 @@ fn typed_value(kind: &str, value: Value) -> Result<Value> {
             let v = raw.parse::<f64>().map_err(|_| "Enter a number.")?;
             if !v.is_finite() {
                 return Err("Enter a finite number.".into());
+            }
+            Ok(json!(v))
+        }
+        // Star rating: 0 to 5 in half-star steps. Empty means "not rated", which differs from 0.
+        "rating" => {
+            let v = raw.parse::<f64>().map_err(|_| "Enter a rating from 0 to 5.")?;
+            if !(0.0..=5.0).contains(&v) || (v * 2.0).fract() != 0.0 {
+                return Err("A rating must be 0 to 5 in steps of 0.5.".into());
             }
             Ok(json!(v))
         }
