@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filename, matches, moveKey, ordered, ratingSteps, ratingText, sortedVideos, tagCounts, tagSet, text, toggleTag, type Query, type Rule, type Video } from './model';
+import { filename, matches, moveKey, moveKeys, ordered, ratingSteps, ratingText, sortedVideos, tagCounts, tagSet, text, toggleTag, type Query, type Rule, type Video } from './model';
 
 const videos: Video[] = [
   { id: 1, path: 'C:\\Sources\\Dragön & 01.mp4', size: 50, values: { '1': ['Dragön', 'Adventure'], '2': 90, '3': '2025-03-01' }, images: [] },
@@ -88,5 +88,18 @@ describe('tag filters', () => {
   });
   it('counts tags by use', () => {
     expect(tagCounts(tagged, 't')).toEqual([['Comedy', 2], ['Drama', 2], ['Action', 1], ['Horror', 1]]);
+  });
+});
+describe('moving a group of columns', () => {
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8'];
+  it('drops the group after a later target and before an earlier one', () => {
+    expect(moveKeys(keys, ['2', '6', '7'], '2', '3')).toEqual(['1', '3', '2', '6', '7', '4', '5', '8']);
+    expect(moveKeys(keys, ['2', '6', '7'], '6', '1')).toEqual(['2', '6', '7', '1', '3', '4', '5', '8']);
+    expect(moveKeys(keys, ['7', '2'], '7', '8')).toEqual(['1', '3', '4', '5', '6', '8', '2', '7']);
+  });
+  it('matches single moves and ignores drops onto the group', () => {
+    expect(moveKeys(keys, ['4'], '4', '6')).toEqual(moveKey(keys, '4', '6'));
+    expect(moveKeys(keys, ['6'], '6', '2')).toEqual(moveKey(keys, '6', '2'));
+    expect(moveKeys(keys, ['2', '6'], '2', '6')).toEqual(keys);
   });
 });

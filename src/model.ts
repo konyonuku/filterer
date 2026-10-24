@@ -58,6 +58,17 @@ export function moveKey(keys: string[], from: string, to: string): string[] {
   next.splice(end, 0, from);
   return next;
 }
+/**
+ * Moves a group of keys (kept in their current relative order) next to `to`, as when dropping `from`,
+ * one of the group, onto `to`: after `to` when `from` started before it, otherwise before it.
+ */
+export function moveKeys(keys: string[], group: string[], from: string, to: string): string[] {
+  if (group.includes(to) || !keys.includes(from) || !keys.includes(to)) return keys;
+  const moving = keys.filter(key => group.includes(key) || key === from);
+  const rest = keys.filter(key => !moving.includes(key));
+  const at = rest.indexOf(to) + (keys.indexOf(from) < keys.indexOf(to) ? 1 : 0);
+  return [...rest.slice(0, at), ...moving, ...rest.slice(at)];
+}
 export const filename = (path: string) => path.split(/[\\/]/).pop() || path;
 export function text(value: unknown): string {
   if (value == null) return '';

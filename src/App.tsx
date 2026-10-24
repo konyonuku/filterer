@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, Eye, EyeOff, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
 import { cancel, chooseFile, chooseFolder, desktop, request } from './bridge';
-import { filename, moveKey, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
+import { filename, moveKey, moveKeys, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
 
 type Panel = null | 'sources' | 'field' | 'edit' | 'move' | 'options' | 'history' | 'save' | 'detail';
 const ratingFitWidth = 110;
@@ -358,6 +358,7 @@ export default function App() {
     saveHidden(hiddenColumns.filter(k => !keys.includes(k)));
     setColumnMenu(null); setUnhide(null); setColumnSelection(keys); columnAnchor.current = keys[keys.length - 1] ?? null;
   }
+  /** Clicking a header cell selects the column; Ctrl / Ctrl+Shift combine with the selection anywhere in the header. */
   function clickHeader(e: MouseEvent, key: string) {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && columnAnchor.current && columns.includes(columnAnchor.current)) {
       const a = columns.indexOf(columnAnchor.current), b = columns.indexOf(key);
@@ -369,7 +370,12 @@ export default function App() {
       columnAnchor.current = key;
       return;
     }
-    setColumnSelection([]); sortBy(key);
+    setColumnSelection([key]); columnAnchor.current = key;
+  }
+  /** Only a plain click on the column name sorts; Ctrl clicks fall through to the cell as selection. */
+  function clickHeaderName(e: MouseEvent, key: string) {
+    if (e.ctrlKey || e.metaKey) return;
+    e.stopPropagation(); setColumnSelection([]); sortBy(key);
   }
   function hideColumns(keys: string[]) {
     saveHidden([...hiddenColumns, ...keys]);
@@ -394,14 +400,18 @@ export default function App() {
       onDrop: (e: DragEvent) => {
         e.preventDefault();
         if (drag?.kind === kind && drag.key !== key) {
-          saveOrder(setting, moveKey(kind === 'column' ? columnOrder : filterOrder, drag.key, key));
-          if (kind === 'column') { setColumnSelection([drag.key]); columnAnchor.current = drag.key; }
+          if (kind === 'column') {
+            // Dragging one of several selected columns moves the whole selection together.
+            const group = dragGroup.length > 1 ? dragGroup : [drag.key];
+            if (!group.includes(key)) { saveOrder(setting, moveKeys(columnOrder, group, drag.key, key)); setColumnSelection(group); columnAnchor.current = drag.key; }
+          } else saveOrder(setting, moveKey(filterOrder, drag.key, key));
         }
         setDrag(null); setDragOver(null);
       },
     };
   }
-  const dragClass = (kind: 'column' | 'filter', key: string) => drag?.kind !== kind ? '' : drag.key === key ? ' dragging' : dragOver === key ? ' drag-over' : '';
+  const dragGroup = drag?.kind === 'column' && columnSelection.includes(drag.key) ? columnSelection : [];
+  const dragClass = (kind: 'column' | 'filter', key: string) => drag?.kind !== kind ? '' : drag.key === key || (kind === 'column' && dragGroup.includes(key)) ? ' dragging' : dragOver === key ? ' drag-over' : '';
   const changeQuery = (q: Query) => { setQuery(q); setPage(0); setSelected(new Set()); setPreset(''); };
   const setRule = (field: Field, rule: Rule | null) => changeQuery({ ...query, rules: [...activeRules.filter(r => String(r.field) !== String(field.id)), ...(rule ? [rule] : [])] });
   const close = () => { if (!busy) setPanel(null); };
@@ -536,7 +546,7 @@ export default function App() {
         {view === 'list' ? <div className="table-container"><table ref={tableRef} style={customWidths ? { width: tableWidth } : undefined}><thead onContextMenu={openColumnMenu}><tr><th className="checkbox-col"><input type="checkbox" aria-label="Select all on this page" checked={pageRows.length > 0 && pageRows.every(v => selected.has(v.id))} onChange={e => setSelected(prev => { const next = new Set(prev); pageRows.forEach(v => e.target.checked ? next.add(v.id) : next.delete(v.id)); return next; })} /></th>{columns.map(key => {
             const field = fieldsById.get(key);
             const className = key === 'name' ? 'filename-col' : key === 'size' || field?.kind === 'number' ? 'numeric' : '';
-            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}${columnSelection.includes(key) ? ' col-selected' : ''}`} {...dragSource('column', key)} {...dropTarget('column', key)}><button title="Click to sort · Ctrl+click to select · Ctrl+Shift+click to select a range · Right-click for options" onClick={e => clickHeader(e, key)}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
+            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}${columnSelection.includes(key) ? ' col-selected' : ''}`} {...dragSource('column', key)} {...dropTarget('column', key)} title="Click to select · Ctrl+click to add · Ctrl+Shift+click for a range · Drag to move · Right-click for options" onClick={e => clickHeader(e, key)}><button title="Click to sort" onClick={e => clickHeaderName(e, key)}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
           })}<th className="actions-col" /></tr></thead>
           <tbody>{pageRows.map(video => <tr key={video.id} className={selected.has(video.id) ? 'row-selected' : ''} onClick={e => toggleSelection(video, e.shiftKey)} onDoubleClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}>
             <td><input type="checkbox" aria-label={`Select ${filename(video.path)}`} checked={selected.has(video.id)} onChange={() => toggleSelection(video)} onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} /></td>{columns.map(key => {
