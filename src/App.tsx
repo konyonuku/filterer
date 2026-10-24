@@ -3,9 +3,9 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
 import { cancel, chooseFile, chooseFolder, desktop, request } from './bridge';
-import { filename, moveKey, ordered, size, sortedVideos, text, type Field, type ImageRef, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
+import { filename, moveKey, ordered, pageSizes, size, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
 
-type Panel = null | 'sources' | 'field' | 'edit' | 'move' | 'settings' | 'history' | 'save' | 'detail';
+type Panel = null | 'sources' | 'field' | 'edit' | 'move' | 'options' | 'history' | 'save' | 'detail';
 const kinds = { text: 'Text', number: 'Number', date: 'Date', tags: 'Tags · multiple values' };
 const imageCache = new Map<string, string>();
 
@@ -89,13 +89,14 @@ export default function App() {
   const [resuming, setResuming] = useState(false);
   const [player, setPlayer] = useState('');
   const [format, setFormat] = useState('m3u8');
+  const [draft, setDraft] = useState<Options>({ unclassified_folder: '', shared_folder: '', page_size: 100, visible_fields: 6 });
+  const [resetOrder, setResetOrder] = useState({ column: false, filter: false });
   const [detailId, setDetailId] = useState<number | null>(null);
   const [detailImage, setDetailImage] = useState(0);
   const [comparisons, setComparisons] = useState<Record<string, Rule['op']>>({});
   const [drag, setDrag] = useState<{ kind: 'column' | 'filter'; key: string } | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
   const anchor = useRef<number | null>(null);
-  const pageSize = 100;
 
   const load = (snapshot: Snapshot) => { setData(snapshot); setSelected(new Set()); setPlayer(snapshot.player); setFormat(snapshot.playlist_format); };
   async function run<T,>(payload: Record<string, unknown>, done?: (value: T) => void, message = 'Done.') {
@@ -120,6 +121,8 @@ export default function App() {
   }, []);
 
   const rows = useMemo(() => sortedVideos(data?.videos || [], query, sort.key, sort.reverse), [data, query, sort]);
+  const pageSize = data?.options.page_size || 100;
+  const visibleFields = data?.options.visible_fields || 6;
   const pages = Math.max(1, Math.ceil(rows.length / pageSize));
   const currentPage = Math.min(page, pages - 1);
   const pageRows = rows.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
@@ -127,10 +130,10 @@ export default function App() {
   const detail = data?.videos.find(v => v.id === detailId);
   const fieldsById = new Map((data?.fields || []).map(f => [String(f.id), f]));
   const filterOrder = ordered([...fieldsById.keys()], data?.filter_order);
-  const filterFields = filterOrder.map(key => fieldsById.get(key)!).slice(0, allFilters ? undefined : 6);
+  const filterFields = filterOrder.map(key => fieldsById.get(key)!).slice(0, allFilters ? undefined : visibleFields);
   const columnOrder = ordered(['name', ...fieldsById.keys(), 'size'], data?.column_order);
   let shownFieldColumns = 0;
-  const columns = columnOrder.filter(key => key === 'name' || key === 'size' || shownFieldColumns++ < 6);
+  const columns = columnOrder.filter(key => key === 'name' || key === 'size' || shownFieldColumns++ < visibleFields);
   const activeRules = query.rules || [];
   function saveOrder(setting: 'column_order' | 'filter_order', order: string[]) {
     setData(previous => previous && { ...previous, [setting]: order });
@@ -179,9 +182,10 @@ export default function App() {
       const field = data?.fields[0];
       setFieldId(field ? String(field.id) : '');
       setEditValue(chosen.length === 1 && field ? text(chosen[0].values[String(field.id)]) : '');
-      setPlan(null); setOverrides({}); setMultiple('group'); setGroup('Multiple values'); setAcknowledged(false); setCrossConfirmed(false); setMoveConfirmed(false);
+      setPlan(null); setOverrides({}); setMultiple('group'); setGroup(data?.options.shared_folder || 'Multiple values'); setAcknowledged(false); setCrossConfirmed(false); setMoveConfirmed(false);
       setResuming(false);
     }
+    if (which === 'options' && data) { setDraft(data.options); setPlayer(data.player); setFormat(data.playlist_format); setResetOrder({ column: false, filter: false }); }
     setPanel(which);
   }
   function toggleSelection(video: Video, shift = false) {
@@ -231,10 +235,11 @@ export default function App() {
       <section className="workspace-bar">
         <div className="workspace-title"><span className="workspace-icon"><Folder size={21} /></span><div><h1>{filename(data.root)}</h1><p title={data.root}>{data.root}</p></div></div>
         <div className="workspace-actions"><span className="source-count">{data.sources.length} source {data.sources.length === 1 ? 'folder' : 'folders'}</span><button disabled={busy} onClick={() => openPanel('sources')}><FolderPlus size={15} />Add folder</button>
+          <button className="icon-button" aria-label="Options" title="Options" disabled={busy} onClick={() => openPanel('options')}><Settings2 size={18} /></button>
           <div className="menu-anchor"><button className="icon-button" aria-label="More" aria-expanded={menu} disabled={busy} onClick={() => setMenu(!menu)}><MoreHorizontal size={20} /></button>
             {menu && <><div className="menu-dismiss" onClick={() => setMenu(false)} /><div className="dropdown-menu">
               <button onClick={() => { setMenu(false); void run({ action: 'scan' }, scanResult, 'List refreshed.'); }}><RefreshCw size={15} />Rescan source folders</button>
-              <button onClick={() => openPanel('field')}><Tag size={15} />Add field</button><button onClick={() => openPanel('settings')}><Settings2 size={15} />Player settings</button><button onClick={() => openPanel('history')}><List size={15} />Move history</button>
+              <button onClick={() => openPanel('field')}><Tag size={15} />Add field</button><button onClick={() => openPanel('history')}><List size={15} />Move history</button>
             </div></>}
           </div>
         </div>
@@ -258,7 +263,7 @@ export default function App() {
             </div>;
           })}
           {!data.fields.length && <div className="filter-onboarding"><Tag size={16} /><span>Add a field to filter by it here.</span><button className="text-button" onClick={() => openPanel('field')}>Add field</button></div>}
-          {data.fields.length > 6 && <button className="text-button more-filters" onClick={() => setAllFilters(!allFilters)}>{allFilters ? 'Show default filters only' : `Show ${data.fields.length - 6} more filters`}</button>}
+          {data.fields.length > visibleFields && <button className="text-button more-filters" onClick={() => setAllFilters(!allFilters)}>{allFilters ? 'Show default filters only' : `Show ${data.fields.length - visibleFields} more filters`}</button>}
         </div>}
         {activeRules.length > 0 && <div className="filter-summary"><span>{query.mode === 'OR' ? 'Match any condition' : 'Match all conditions'}</span><button className="text-button" onClick={() => changeQuery({ ...query, mode: query.mode === 'OR' ? 'AND' : 'OR' })}>Toggle AND / OR</button></div>}
       </section>
@@ -321,7 +326,7 @@ export default function App() {
     {panel === 'move' && data && <Modal title={resuming ? 'Retry interrupted organization' : 'Organize folders'} subtitle={resuming ? 'Move the remaining files to the destinations saved in the record.' : `Move ${chosen.length} selected ${chosen.length === 1 ? 'video' : 'videos'} and related files into real folders.`} onClose={close} wide>
       {!data.fields.length ? <div className="modal-empty"><Tag size={28} /><p>Create a field first.</p><button className="primary" onClick={() => openPanel('field')}>Add field</button></div> : <>
         {!resuming && <div className="move-controls"><label className="form-field">Organize by<select value={fieldId} disabled={busy} onChange={e => { setFieldId(e.target.value); setOverrides({}); invalidatePlan(); }}>{data.fields.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label><label className="form-field">When there are multiple values<select value={multiple} disabled={busy} onChange={e => { setMultiple(e.target.value); invalidatePlan(); }}><option value="group">Gather into a shared folder</option><option value="ask">Choose per video</option></select></label>{multiple === 'group' && <label className="form-field">Shared folder name<input value={group} onChange={e => { setGroup(e.target.value); invalidatePlan(); }} /></label>}</div>}
-        <p className="destination-hint"><Folder size={14} />{data.root}\videos\<strong>field value</strong>\file name<span>No value → Unclassified</span></p>
+        <p className="destination-hint"><Folder size={14} />{data.root}\videos\<strong>field value</strong>\file name<span>No value → {data.options.unclassified_folder}</span></p>
         {multiVideos.length > 0 && <div className="multi-resolutions">{multiVideos.map(v => <label className="form-field" key={v.id}>{filename(v.path)}<select value={overrides[String(v.id)] || ''} onChange={e => { setOverrides({ ...overrides, [v.id]: e.target.value }); invalidatePlan(); }}><option value="">Choose destination</option>{(v.values[fieldId] as string[]).map(val => <option key={val}>{val}</option>)}</select></label>)}</div>}
         <div className="preview-heading"><strong>Move preview</strong>{!resuming && <button disabled={busy || multiVideos.some(v => !overrides[String(v.id)])} onClick={() => void run<Plan>({ action: 'plan', ids: chosen.map(v => v.id), field: Number(fieldId), multiple, group, overrides }, p => { setPlan(p); setAcknowledged(false); setMoveConfirmed(false); setCrossConfirmed(false); }, 'Review the move plan.') }><RefreshCw size={13} />{plan ? 'Check again' : 'Create preview'}</button>}</div>
         {!plan ? <div className="plan-placeholder"><FolderOpen size={27} /><p>Create a preview to review the actual move paths and related files.</p></div> : <>
@@ -335,9 +340,13 @@ export default function App() {
       </>}
     </Modal>}
 
-    {panel === 'settings' && data && <Modal title="Player settings" subtitle="Videos open in your existing video player." onClose={close}>
-      <label className="form-field">Player executable<div className="input-with-button"><input value={player} onChange={e => setPlayer(e.target.value)} placeholder="Leave empty to use the OS default app" /><button disabled={busy} onClick={() => void chooseFile().then(p => { if (p) setPlayer(p); }).catch(e => setError(String(e)))}>Browse</button></div></label><label className="form-field">New playlist format<select value={format} onChange={e => setFormat(e.target.value)}><option value="m3u8">M3U8 · VLC / PotPlayer</option><option value="asx">ASX · Windows Media Player</option></select></label><p className="form-hint">If the default app cannot open the playlist, set the player executable.</p>
-      <div className="modal-actions"><button onClick={close}>Cancel</button><button className="primary" disabled={busy} onClick={() => void run<Snapshot>({ action: 'player_settings', player, format }, s => { load(s); setPanel(null); }, 'Player settings saved.')}>Save</button></div>
+    {panel === 'options' && data && <Modal title="Options" subtitle="Settings for this workspace." onClose={close}>
+      <section className="options-section"><h3>Organizing folders</h3><div className="move-controls"><label className="form-field">Folder for videos without a value<input value={draft.unclassified_folder} maxLength={100} onChange={e => setDraft({ ...draft, unclassified_folder: e.target.value })} /></label><label className="form-field">Default shared folder for multiple values<input value={draft.shared_folder} maxLength={100} onChange={e => setDraft({ ...draft, shared_folder: e.target.value })} /></label></div><p className="form-hint">Used under {data.root}\videos\. Existing folders are not renamed.</p></section>
+      <section className="options-section"><h3>List and filters</h3><div className="move-controls"><label className="form-field">Rows per page<select value={draft.page_size} onChange={e => setDraft({ ...draft, page_size: Number(e.target.value) })}>{pageSizes.map(n => <option key={n} value={n}>{n}</option>)}</select></label><label className="form-field">Default filters and columns<input type="number" min={1} max={50} value={draft.visible_fields} onChange={e => setDraft({ ...draft, visible_fields: Number(e.target.value) })} /></label></div><p className="form-hint">The first fields in filter and column order are shown by default. The rest open with “Show more filters”.</p>
+        {([['column', 'Column order', columnOrder.map(key => key === 'name' ? 'File name' : key === 'size' ? 'Size' : fieldsById.get(key)?.name || key)], ['filter', 'Filter order', filterOrder.map(key => fieldsById.get(key)?.name || key)]] as const).map(([kind, label, names]) => <div className="order-row" key={kind}><div><strong>{label}</strong><span title={names.join(' · ')}>{resetOrder[kind] ? 'Resets to the default order when saved' : names.join(' · ') || 'No fields yet'}</span></div><button disabled={busy || resetOrder[kind] || !data[`${kind}_order`].length} onClick={() => setResetOrder({ ...resetOrder, [kind]: true })}><RefreshCw size={13} />Reset to default</button></div>)}
+        <p className="form-hint">To change the order, drag column headers or filter labels on the main screen.</p></section>
+      <section className="options-section"><h3>Player</h3><label className="form-field">Player executable<div className="input-with-button"><input value={player} onChange={e => setPlayer(e.target.value)} placeholder="Leave empty to use the OS default app" /><button disabled={busy} onClick={() => void chooseFile().then(p => { if (p) setPlayer(p); }).catch(e => setError(String(e)))}>Browse</button></div></label><label className="form-field">New playlist format<select value={format} onChange={e => setFormat(e.target.value)}><option value="m3u8">M3U8 · VLC / PotPlayer</option><option value="asx">ASX · Windows Media Player</option></select></label><p className="form-hint">If the default app cannot open the playlist, set the player executable.</p></section>
+      <div className="modal-actions"><button onClick={close}>Cancel</button><button className="primary" disabled={busy || !draft.unclassified_folder.trim() || !draft.shared_folder.trim() || !(draft.visible_fields >= 1 && draft.visible_fields <= 50)} onClick={() => void run<Snapshot>({ action: 'options', player, format, options: { ...draft, unclassified_folder: draft.unclassified_folder.trim(), shared_folder: draft.shared_folder.trim(), visible_fields: Math.round(draft.visible_fields) }, ...(resetOrder.column && { column_order: [] }), ...(resetOrder.filter && { filter_order: [] }) }, s => { load(s); setPage(0); setPanel(null); }, 'Options saved.')}>Save</button></div>
     </Modal>}
     {panel === 'history' && data && <Modal title="Move history" subtitle="For interrupted moves, reconcile file locations and then retry the remaining files." onClose={close} wide>
       <div className="history-list">{data.history.length ? data.history.map(h => <article key={h.id}><div><span className={`pill ${h.status === 'attention' ? 'amber' : ''}`}>{({ complete: 'Complete', stopped: 'Stopped', attention: 'Needs review' } as Record<string, string>)[h.status] || h.status}</span><time>{new Date(/^\d+$/.test(h.created) ? Number(h.created) * 1000 : h.created).toLocaleString('en')}</time>{h.status === 'stopped' && h.payload.items?.some(i => i.state === 'planned') && <button disabled={busy} onClick={() => void run<Plan>({ action: 'resume', id: h.id }, p => { setPlan(p); setResuming(true); setAcknowledged(false); setMoveConfirmed(false); setCrossConfirmed(false); setFieldId(String(data.fields[0]?.id || '')); setPanel('move'); }, 'Review the remaining move paths of the interrupted operation.')}>Retry remaining files</button>}</div>{h.payload.error && <p className="warning-text">{h.payload.error}</p>}<details><summary>Show file paths</summary>{h.payload.items?.map((i, n) => <p key={n}><span className="pill">{i.state}</span>{i.source} → {i.target}</p>)}</details></article>) : <div className="modal-empty"><Check size={25} /><p>No move history yet.</p></div>}</div>

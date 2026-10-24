@@ -60,9 +60,14 @@ enum Request {
         key: String,
         value: Value,
     },
-    PlayerSettings {
+    Options {
         player: String,
         format: String,
+        options: catalog::Options,
+        #[serde(default)]
+        column_order: Option<Vec<String>>,
+        #[serde(default)]
+        filter_order: Option<Vec<String>>,
     },
     Plan {
         ids: Vec<i64>,
@@ -138,15 +143,28 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
         Request::AddImage { id, path, cover } => ws.add_image(id, &path, cover)?,
         Request::Image { id } => return serialized(ws.image_data(id)?),
         Request::Setting { key, value } => ws.set_setting(&key, value)?,
-        Request::PlayerSettings { player, format } => {
+        Request::Options {
+            player,
+            format,
+            options,
+            column_order,
+            filter_order,
+        } => {
             if !player.is_empty() && !Path::new(&player).is_file() {
                 return Err("Check the player executable.".into());
             }
             if !["m3u8", "asx"].contains(&format.as_str()) {
                 return Err("Check the playlist format.".into());
             }
+            ws.set_options(&options)?;
             ws.set_setting("player", json!(player))?;
             ws.set_setting("playlist_format", json!(format))?;
+            if let Some(order) = column_order {
+                ws.set_setting("column_order", json!(order))?;
+            }
+            if let Some(order) = filter_order {
+                ws.set_setting("filter_order", json!(order))?;
+            }
         }
         Request::Plan {
             ids,

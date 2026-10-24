@@ -9,8 +9,10 @@ export type History = { id: string; created: string; status: string; payload: { 
 export type Snapshot = {
   root: string; fields: Field[]; videos: Video[]; folders: { name: string; query: Query }[];
   sources: { path: string; recursive: boolean }[]; history: History[]; player: string; playlist_format: string;
-  column_order: string[]; filter_order: string[];
+  column_order: string[]; filter_order: string[]; options: Options;
 };
+export type Options = { unclassified_folder: string; shared_folder: string; page_size: number; visible_fields: number };
+export const pageSizes = [25, 50, 100, 200, 500];
 /** Applies a saved order to the current keys: unknown saved keys are dropped, new keys keep their default position at the end. */
 export function ordered(keys: string[], saved: string[] = []): string[] {
   const known = saved.filter((key, i) => keys.includes(key) && saved.indexOf(key) === i);

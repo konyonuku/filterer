@@ -340,3 +340,42 @@ fn column_and_filter_order_persist_and_reject_invalid_values() {
     assert_eq!(snapshot.column_order, ["size", "1", "name"]);
     assert_eq!(snapshot.filter_order, ["2", "1"]);
 }
+
+#[test]
+fn options_default_validate_and_rename_unclassified_folder() {
+    let (_temp, mut ws, source) = fixture();
+    let defaults = ws.options().unwrap();
+    assert_eq!(defaults.unclassified_folder, "Unclassified");
+    assert_eq!(defaults.shared_folder, "Multiple values");
+    assert_eq!((defaults.page_size, defaults.visible_fields), (100, 6));
+
+    let bad = |change: fn(&mut Options)| {
+        let mut options = Options::default();
+        change(&mut options);
+        options
+    };
+    assert!(ws.set_options(&bad(|o| o.unclassified_folder = "a/b".into())).is_err());
+    assert!(ws.set_options(&bad(|o| o.shared_folder = " ".into())).is_err());
+    assert!(ws.set_options(&bad(|o| o.page_size = 123)).is_err());
+    assert!(ws.set_options(&bad(|o| o.visible_fields = 0)).is_err());
+    assert_eq!(ws.options().unwrap().page_size, 100);
+
+    ws.set_options(&Options {
+        unclassified_folder: " No value ".into(),
+        shared_folder: "Several".into(),
+        page_size: 50,
+        visible_fields: 3,
+    })
+    .unwrap();
+    let saved = ws.snapshot().unwrap().options;
+    assert_eq!(saved.unclassified_folder, "No value");
+    assert_eq!((saved.shared_folder.as_str(), saved.page_size, saved.visible_fields), ("Several", 50, 3));
+
+    write(&source.join("plain.mp4"));
+    scan(&mut ws, &source);
+    ws.add_field("Studio", "text").unwrap();
+    let id = ws.videos().unwrap()[0].id;
+    let field = ws.fields().unwrap()[0].id;
+    let plan = preview(&mut ws, id, field);
+    assert_eq!(plan.items[0].target, ws.root.join("videos").join("No value").join("plain.mp4"));
+}

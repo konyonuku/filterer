@@ -145,6 +145,25 @@ pub struct Snapshot {
     pub playlist_format: String,
     pub column_order: Vec<String>,
     pub filter_order: Vec<String>,
+    pub options: Options,
+}
+pub const PAGE_SIZES: &[u32] = &[25, 50, 100, 200, 500];
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Options {
+    pub unclassified_folder: String,
+    pub shared_folder: String,
+    pub page_size: u32,
+    pub visible_fields: u32,
+}
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            unclassified_folder: "Unclassified".into(),
+            shared_folder: "Multiple values".into(),
+            page_size: 100,
+            visible_fields: 6,
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MoveItem {
@@ -360,6 +379,7 @@ impl Workspace {
                 .into(),
             column_order: serde_json::from_value(self.setting("column_order")?).unwrap_or_default(),
             filter_order: serde_json::from_value(self.setting("filter_order")?).unwrap_or_default(),
+            options: self.options()?,
         })
     }
     pub fn add_source(&self, path: &Path, recursive: bool) -> Result<()> {
@@ -508,6 +528,47 @@ impl Workspace {
         {
             return Err("The order must be a list of names.".into());
         }
+        self.write_setting(key, value)
+    }
+    /// Stored options with defaults filled in for missing or unreadable values.
+    pub fn options(&self) -> Result<Options> {
+        let default = Options::default();
+        let name = |key: &str, fallback: String| -> Result<String> {
+            Ok(match self.setting(key)?.as_str() {
+                Some(v) if folder_name(v).is_ok() => v.into(),
+                _ => fallback,
+            })
+        };
+        let page_size = self.setting("page_size")?.as_u64().map(|v| v as u32);
+        let visible = self.setting("visible_fields")?.as_u64().map(|v| v as u32);
+        Ok(Options {
+            unclassified_folder: name("unclassified_folder", default.unclassified_folder)?,
+            shared_folder: name("shared_folder", default.shared_folder)?,
+            page_size: page_size
+                .filter(|v| PAGE_SIZES.contains(v))
+                .unwrap_or(default.page_size),
+            visible_fields: visible
+                .filter(|v| (1..=50).contains(v))
+                .unwrap_or(default.visible_fields),
+        })
+    }
+    pub fn set_options(&self, options: &Options) -> Result<()> {
+        let unclassified = options.unclassified_folder.trim();
+        let shared = options.shared_folder.trim();
+        folder_name(unclassified)?;
+        folder_name(shared)?;
+        if !PAGE_SIZES.contains(&options.page_size) {
+            return Err("Check the number of rows per page.".into());
+        }
+        if !(1..=50).contains(&options.visible_fields) {
+            return Err("Default filters and columns must be between 1 and 50.".into());
+        }
+        self.write_setting("unclassified_folder", json!(unclassified))?;
+        self.write_setting("shared_folder", json!(shared))?;
+        self.write_setting("page_size", json!(options.page_size))?;
+        self.write_setting("visible_fields", json!(options.visible_fields))
+    }
+    fn write_setting(&self, key: &str, value: Value) -> Result<()> {
         self.db
             .execute(
                 "INSERT OR REPLACE INTO settings VALUES (?1,?2)",
@@ -640,6 +701,7 @@ impl Workspace {
             );
         }
         let records = self.videos()?;
+        let unclassified = self.options()?.unclassified_folder;
         let mut plan = MovePlan {
             id: Uuid::new_v4().to_string(),
             created: now(),
@@ -677,7 +739,7 @@ impl Workspace {
                     values
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| "Unclassified".into())
+                        .unwrap_or_else(|| unclassified.clone())
                 };
                 folder_name(&category)?;
                 let destination = self.root.join("videos").join(category);
