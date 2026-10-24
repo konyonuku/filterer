@@ -173,6 +173,10 @@ export default function App() {
   const [columnSelection, setColumnSelection] = useState<string[]>([]);
   const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; keys: string[] } | null>(null);
   const [unhide, setUnhide] = useState<{ x: number; y: number; chosen: string[] } | null>(null);
+  const columnAnchor = useRef<string | null>(null);
+  // Selection before a right-click; restored when the menu closes without an action.
+  const selectionBeforeMenu = useRef<string[]>([]);
+  const dismissColumnMenus = useRef<() => boolean>(() => false);
   const resizing = useRef(false);
   const [editing, setEditing] = useState<{ id: number; field: string; original: string } | null>(null);
   const editingRef = useRef(editing);
@@ -181,7 +185,7 @@ export default function App() {
   const tagDraftRef = useRef(tagDraft);
   const [tagText, setTagText] = useState('');
 
-  const load = (snapshot: Snapshot) => { setData(snapshot); setSelected(new Set()); setPlayer(snapshot.player); setFormat(snapshot.playlist_format); };
+  const load = (snapshot: Snapshot) => { setData(snapshot); setSelected(new Set()); setColumnSelection([]); setPlayer(snapshot.player); setFormat(snapshot.playlist_format); };
   async function run<T,>(payload: Record<string, unknown>, done?: (value: T) => void, message = 'Done.') {
     if (busyRef.current) return;
     busyRef.current = true; setBusy(true); setError(''); setStatus('Working…');
@@ -216,6 +220,21 @@ export default function App() {
     return () => { void unlisten.then(fn => fn()); void closeListener.then(fn => fn()); };
     // Startup IPC and progress listener are intentionally registered once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Column selection lives only while the user works with headers: any other click or Escape clears it.
+  useEffect(() => {
+    const down = (e: globalThis.PointerEvent) => {
+      if ((e.target as Element | null)?.closest('th[data-col], .context-menu, .unhide-panel, .menu-dismiss')) return;
+      setColumnSelection(current => current.length ? [] : current);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (!dismissColumnMenus.current()) setColumnSelection(current => current.length ? [] : current);
+    };
+    document.addEventListener('pointerdown', down, true);
+    document.addEventListener('keydown', key);
+    return () => { document.removeEventListener('pointerdown', down, true); document.removeEventListener('keydown', key); };
   }, []);
 
   const rows = useMemo(() => sortedVideos(data?.videos || [], query, sort.key, sort.reverse), [data, query, sort]);
@@ -323,9 +342,34 @@ export default function App() {
     e.preventDefault();
     const key = (e.target as Element).closest<HTMLElement>('th[data-col]')?.dataset.col;
     const keys = key ? (columnSelection.includes(key) ? columnSelection : [key]) : columnSelection;
+    selectionBeforeMenu.current = columnSelection;
     if (key && !columnSelection.includes(key)) setColumnSelection([key]);
     setUnhide(null);
     setColumnMenu({ x: Math.min(e.clientX, window.innerWidth - 240), y: Math.min(e.clientY, window.innerHeight - 150), keys });
+  }
+  /** Closing the column menu or picker without acting drops a right-click-only selection but keeps a Ctrl selection. */
+  function dismissMenus() {
+    if (!columnMenu && !unhide) return false;
+    setColumnMenu(null); setUnhide(null); setColumnSelection(selectionBeforeMenu.current);
+    return true;
+  }
+  dismissColumnMenus.current = dismissMenus;
+  function showColumns(keys: string[]) {
+    saveHidden(hiddenColumns.filter(k => !keys.includes(k)));
+    setColumnMenu(null); setUnhide(null); setColumnSelection(keys); columnAnchor.current = keys[keys.length - 1] ?? null;
+  }
+  function clickHeader(e: MouseEvent, key: string) {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && columnAnchor.current && columns.includes(columnAnchor.current)) {
+      const a = columns.indexOf(columnAnchor.current), b = columns.indexOf(key);
+      setColumnSelection([...new Set([...columnSelection, ...columns.slice(Math.min(a, b), Math.max(a, b) + 1)])]);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      setColumnSelection(columnSelection.includes(key) ? columnSelection.filter(k => k !== key) : [...columnSelection, key]);
+      columnAnchor.current = key;
+      return;
+    }
+    setColumnSelection([]); sortBy(key);
   }
   function hideColumns(keys: string[]) {
     saveHidden([...hiddenColumns, ...keys]);
@@ -349,7 +393,10 @@ export default function App() {
       onDragOver: (e: DragEvent) => { if (drag?.kind !== kind) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragOver(key); },
       onDrop: (e: DragEvent) => {
         e.preventDefault();
-        if (drag?.kind === kind && drag.key !== key) saveOrder(setting, moveKey(kind === 'column' ? columnOrder : filterOrder, drag.key, key));
+        if (drag?.kind === kind && drag.key !== key) {
+          saveOrder(setting, moveKey(kind === 'column' ? columnOrder : filterOrder, drag.key, key));
+          if (kind === 'column') { setColumnSelection([drag.key]); columnAnchor.current = drag.key; }
+        }
         setDrag(null); setDragOver(null);
       },
     };
@@ -418,15 +465,15 @@ export default function App() {
       <button className="top-button" disabled={busy} onClick={() => void openWorkspace()}><FolderOpen size={15} />{data ? 'Change workspace' : 'Open workspace'}</button>
     </header>
 
-    {columnMenu && <><div className="menu-dismiss" onClick={() => setColumnMenu(null)} onContextMenu={e => { e.preventDefault(); setColumnMenu(null); }} /><div className="dropdown-menu context-menu" role="menu" style={{ left: columnMenu.x, top: columnMenu.y }}>
+    {columnMenu && <><div className="menu-dismiss" onClick={dismissMenus} onContextMenu={e => { e.preventDefault(); dismissMenus(); }} /><div className="dropdown-menu context-menu" role="menu" style={{ left: columnMenu.x, top: columnMenu.y }}>
       {(() => { const keys = columnMenu.keys; return <button role="menuitem" disabled={!keys.length} onClick={() => hideColumns(keys)}><EyeOff size={15} />{keys.length > 1 ? `Hide ${keys.length} columns` : keys.length ? `Hide “${columnLabel(keys[0])}”` : 'Hide column'}</button>; })()}
-      <button role="menuitem" disabled={!hiddenShown.length} onClick={() => { saveHidden([]); setColumnMenu(null); }}><Eye size={15} />Show all hidden columns{hiddenShown.length ? ` (${hiddenShown.length})` : ''}</button>
+      <button role="menuitem" disabled={!hiddenShown.length} onClick={() => showColumns(hiddenShown)}><Eye size={15} />Show all hidden columns{hiddenShown.length ? ` (${hiddenShown.length})` : ''}</button>
       <button role="menuitem" disabled={!hiddenShown.length} onClick={() => { setUnhide({ x: columnMenu.x, y: columnMenu.y, chosen: [] }); setColumnMenu(null); }}><Eye size={15} />Show hidden columns…</button>
     </div></>}
-    {unhide && <><div className="menu-dismiss" onClick={() => setUnhide(null)} /><div className="tag-panel unhide-panel" role="dialog" aria-label="Show hidden columns" style={{ left: Math.min(unhide.x, window.innerWidth - 300), top: unhide.y }} onKeyDown={e => { if (e.key === 'Escape') setUnhide(null); }}>
+    {unhide && <><div className="menu-dismiss" onClick={dismissMenus} /><div className="tag-panel unhide-panel" role="dialog" aria-label="Show hidden columns" style={{ left: Math.min(unhide.x, window.innerWidth - 300), top: unhide.y }}>
       <strong className="unhide-title">Hidden columns</strong>
       <div className="tag-options">{hiddenShown.map(key => { const on = unhide.chosen.includes(key); return <button key={key} type="button" autoFocus={key === hiddenShown[0]} className={`tag-option${on ? ' state-all' : ''}`} aria-pressed={on} onClick={() => setUnhide({ ...unhide, chosen: on ? unhide.chosen.filter(k => k !== key) : [...unhide.chosen, key] })}><span className="tag-name">{columnLabel(key)}</span></button>; })}</div>
-      <div className="tag-panel-footer"><span>{unhide.chosen.length} selected</span><button type="button" className="text-button muted" onClick={() => setUnhide(null)}>Cancel</button><button type="button" className="primary unhide-ok" disabled={!unhide.chosen.length} onClick={() => { saveHidden(hiddenColumns.filter(k => !unhide.chosen.includes(k))); setUnhide(null); }}>OK</button></div>
+      <div className="tag-panel-footer"><span>{unhide.chosen.length} selected</span><button type="button" className="text-button muted" onClick={dismissMenus}>Cancel</button><button type="button" className="primary unhide-ok" disabled={!unhide.chosen.length} onClick={() => showColumns(hiddenShown.filter(k => unhide.chosen.includes(k)))}>OK</button></div>
     </div></>}
     {error && <div className="notice error" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
 
@@ -489,10 +536,7 @@ export default function App() {
         {view === 'list' ? <div className="table-container"><table ref={tableRef} style={customWidths ? { width: tableWidth } : undefined}><thead onContextMenu={openColumnMenu}><tr><th className="checkbox-col"><input type="checkbox" aria-label="Select all on this page" checked={pageRows.length > 0 && pageRows.every(v => selected.has(v.id))} onChange={e => setSelected(prev => { const next = new Set(prev); pageRows.forEach(v => e.target.checked ? next.add(v.id) : next.delete(v.id)); return next; })} /></th>{columns.map(key => {
             const field = fieldsById.get(key);
             const className = key === 'name' ? 'filename-col' : key === 'size' || field?.kind === 'number' ? 'numeric' : '';
-            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}${columnSelection.includes(key) ? ' col-selected' : ''}`} {...dragSource('column', key)} {...dropTarget('column', key)}><button title="Click to sort · Ctrl+click to select · Right-click for options" onClick={e => {
-              if (e.ctrlKey || e.metaKey) { setColumnSelection(columnSelection.includes(key) ? columnSelection.filter(k => k !== key) : [...columnSelection, key]); return; }
-              setColumnSelection([]); sortBy(key);
-            }}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
+            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}${columnSelection.includes(key) ? ' col-selected' : ''}`} {...dragSource('column', key)} {...dropTarget('column', key)}><button title="Click to sort · Ctrl+click to select · Ctrl+Shift+click to select a range · Right-click for options" onClick={e => clickHeader(e, key)}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
           })}<th className="actions-col" /></tr></thead>
           <tbody>{pageRows.map(video => <tr key={video.id} className={selected.has(video.id) ? 'row-selected' : ''} onClick={e => toggleSelection(video, e.shiftKey)} onDoubleClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}>
             <td><input type="checkbox" aria-label={`Select ${filename(video.path)}`} checked={selected.has(video.id)} onChange={() => toggleSelection(video)} onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} /></td>{columns.map(key => {
