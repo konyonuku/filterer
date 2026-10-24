@@ -4,7 +4,36 @@ export const ratingSteps = Array.from({ length: 11 }, (_, i) => i / 2);
 export const ratingText = (value: unknown) => typeof value === 'number' ? `${value} / 5` : 'Not rated';
 export type ImageRef = { id: number; path: string; cover: boolean };
 export type Video = { id: number; path: string; size: number; values: Record<string, unknown>; images: ImageRef[] };
-export type Rule = { field: string; op: 'eq' | 'contains' | 'gte' | 'lte' | 'empty'; value?: unknown };
+export type Rule = { field: string; op: 'eq' | 'contains' | 'gte' | 'lte' | 'empty' | 'tags'; value?: unknown };
+/** Tag filter: every `all` tag, at least one `any` tag (when given), and no `none` tag. */
+export type TagSet = { all: string[]; any: string[]; none: string[] };
+export type TagState = keyof TagSet;
+const noTags = (): TagSet => ({ all: [], any: [], none: [] });
+/** Reads a tag rule; a legacy single-tag `eq` rule becomes one required tag. */
+export function tagSet(rule?: Rule): TagSet {
+  if (rule?.op === 'eq' && rule.value != null) return { ...noTags(), all: [text(rule.value)] };
+  if (rule?.op !== 'tags' || !rule.value || typeof rule.value !== 'object') return noTags();
+  const value = rule.value as Partial<TagSet>;
+  const list = (v: unknown) => Array.isArray(v) ? v.map(text) : [];
+  return { all: list(value.all), any: list(value.any), none: list(value.none) };
+}
+/** Puts a tag into one state, or clears it when it is already in that state. */
+export function toggleTag(set: TagSet, tag: string, state: TagState): TagSet {
+  const current = (Object.keys(set) as TagState[]).find(key => set[key].includes(tag));
+  const next: TagSet = { all: set.all.filter(t => t !== tag), any: set.any.filter(t => t !== tag), none: set.none.filter(t => t !== tag) };
+  if (current !== state) next[state] = [...next[state], tag];
+  return next;
+}
+export const tagSetEmpty = (set: TagSet) => !set.all.length && !set.any.length && !set.none.length;
+/** Tags of one field with the number of videos carrying each, most used first. */
+export function tagCounts(videos: Video[], field: string): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const video of videos) {
+    const value = video.values[field];
+    if (Array.isArray(value)) new Set(value.map(text)).forEach(tag => counts.set(tag, (counts.get(tag) || 0) + 1));
+  }
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
 export type Query = { search?: string; mode?: 'AND' | 'OR'; rules?: Rule[] };
 export type MoveItem = { media_id: number; source: string; target: string; cross: boolean; video: boolean; state: string };
 export type Plan = { id: string; items: MoveItem[]; errors: string[]; warnings: string[] };
@@ -43,6 +72,10 @@ export function matches(video: Video, query: Query): boolean {
   const rules = query.rules || [];
   const results = rules.map(rule => {
     const value = video.values[String(rule.field)];
+    if (rule.op === 'tags') {
+      const set = tagSet(rule), tags = Array.isArray(value) ? value.map(text) : [];
+      return set.all.every(t => tags.includes(t)) && (!set.any.length || set.any.some(t => tags.includes(t))) && !set.none.some(t => tags.includes(t));
+    }
     if (rule.op === 'empty') return value == null || text(value) === '';
     if (value == null) return false;
     if (rule.op === 'eq') return Array.isArray(value) ? value.includes(rule.value) : value === rule.value;

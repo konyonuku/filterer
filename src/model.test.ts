@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filename, matches, moveKey, ordered, ratingSteps, ratingText, sortedVideos, text, type Query, type Video } from './model';
+import { filename, matches, moveKey, ordered, ratingSteps, ratingText, sortedVideos, tagCounts, tagSet, text, toggleTag, type Query, type Rule, type Video } from './model';
 
 const videos: Video[] = [
   { id: 1, path: 'C:\\Sources\\Dragön & 01.mp4', size: 50, values: { '1': ['Dragön', 'Adventure'], '2': 90, '3': '2025-03-01' }, images: [] },
@@ -60,5 +60,33 @@ describe('star ratings', () => {
     expect(sortedVideos(rated, {}, 'r', false).map(v => v.id)).toEqual([2, 1, 3]);
     expect(ratingSteps).toEqual([0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]);
     expect([ratingText(0), ratingText(3.5), ratingText(undefined)]).toEqual(['0 / 5', '3.5 / 5', 'Not rated']);
+  });
+});
+describe('tag filters', () => {
+  const tagged: Video[] = [
+    { id: 1, path: 'a.mp4', size: 1, values: { t: ['Drama', 'Action'] }, images: [] },
+    { id: 2, path: 'b.mp4', size: 1, values: { t: ['Drama', 'Comedy', 'Horror'] }, images: [] },
+    { id: 3, path: 'c.mp4', size: 1, values: { t: ['Comedy'] }, images: [] },
+    { id: 4, path: 'd.mp4', size: 1, values: {}, images: [] },
+  ];
+  const ids = (value: object) => sortedVideos(tagged, { rules: [{ field: 't', op: 'tags', value }] }, 'name', false).map(v => v.id);
+  it('combines required, any-of and excluded tags', () => {
+    expect(ids({ all: ['Drama'], any: [], none: [] })).toEqual([1, 2]);
+    expect(ids({ all: [], any: ['Action', 'Comedy'], none: [] })).toEqual([1, 2, 3]);
+    expect(ids({ all: [], any: [], none: ['Drama'] })).toEqual([3, 4]);
+    expect(ids({ all: ['Drama'], any: ['Action', 'Comedy'], none: ['Horror'] })).toEqual([1]);
+  });
+  it('toggles states and reads legacy single-tag rules', () => {
+    let set = toggleTag(tagSet(), 'Drama', 'all');
+    expect(set).toEqual({ all: ['Drama'], any: [], none: [] });
+    set = toggleTag(set, 'Drama', 'none');
+    expect(set).toEqual({ all: [], any: [], none: ['Drama'] });
+    expect(toggleTag(set, 'Drama', 'none')).toEqual({ all: [], any: [], none: [] });
+    const legacy: Rule = { field: 't', op: 'eq', value: 'Comedy' };
+    expect(tagSet(legacy)).toEqual({ all: ['Comedy'], any: [], none: [] });
+    expect(sortedVideos(tagged, { rules: [legacy] }, 'name', false).map(v => v.id)).toEqual([2, 3]);
+  });
+  it('counts tags by use', () => {
+    expect(tagCounts(tagged, 't')).toEqual([['Comedy', 2], ['Drama', 2], ['Action', 1], ['Horror', 1]]);
   });
 });

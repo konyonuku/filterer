@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
 import { cancel, chooseFile, chooseFolder, desktop, request } from './bridge';
-import { filename, moveKey, ordered, pageSizes, ratingSteps, ratingText, size, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
+import { filename, moveKey, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
 
 type Panel = null | 'sources' | 'field' | 'edit' | 'move' | 'options' | 'history' | 'save' | 'detail';
 const ratingFitWidth = 110;
@@ -63,6 +63,41 @@ function StarInput({ value, onChange }: { value: number | null; onChange: (value
     <span className="star-readout">{ratingText(hover ?? value)}</span>
     <button type="button" className="text-button" disabled={value === 0} onClick={() => onChange(0)}>0 stars</button>
     <button type="button" className="text-button muted" disabled={value == null} onClick={() => onChange(null)}>Clear</button>
+  </div>;
+}
+
+const tagStateLabel: Record<TagState, string> = { all: 'Must have', any: 'Any of', none: 'Excluded' };
+
+/** Tag filter: click = must have (AND), Ctrl+click = any of (OR), right-click = exclude (NOT); repeating an action clears it. */
+function TagFilter({ field, videos, rule, onChange, alignRight }: { field: Field; videos: Video[]; rule?: Rule; onChange: (rule: Rule | null) => void; alignRight: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const set = tagSet(rule);
+  const untagged = rule?.op === 'empty';
+  const counts = useMemo(() => tagCounts(videos, String(field.id)), [videos, field.id]);
+  const shown = counts.filter(([tag]) => tag.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
+  const stateOf = (tag: string) => (Object.keys(set) as TagState[]).find(key => set[key].includes(tag));
+  const toggle = (tag: string, state: TagState) => {
+    const next = toggleTag(untagged ? tagSet() : set, tag, state);
+    onChange(tagSetEmpty(next) ? null : { field: String(field.id), op: 'tags', value: next });
+  };
+  const summary = untagged ? 'No tags' : [`${set.all.length} AND`, `${set.any.length} OR`, `${set.none.length} NOT`].filter(part => !part.startsWith('0 ')).join(' · ') || 'Any';
+  const detail = (Object.keys(set) as TagState[]).filter(key => set[key].length).map(key => `${tagStateLabel[key]}: ${set[key].join(', ')}`).join('\n');
+  const close = () => { setOpen(false); setSearch(''); };
+  return <div className="tag-filter">
+    <button id={`filter-${field.id}`} type="button" className="tag-filter-button" aria-haspopup="dialog" aria-expanded={open} title={detail || undefined} onClick={() => open ? close() : setOpen(true)}><span>{summary}</span><ChevronDown size={13} /></button>
+    {open && <><div className="menu-dismiss" onClick={close} /><div className={`tag-panel${alignRight ? ' align-right' : ''}`} role="dialog" aria-label={`${field.name} tag filter`} onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } }}>
+      <div className="search-box tag-search"><Search size={14} /><input autoFocus aria-label="Search tags" placeholder="Search tags" value={search} onChange={e => setSearch(e.target.value)} /></div>
+      <div className="tag-options">{shown.map(([tag, count]) => {
+        const state = stateOf(tag);
+        return <button key={tag} type="button" className={`tag-option${state ? ` state-${state}` : ''}`} aria-pressed={!!state} title={state ? `${tagStateLabel[state]} · ${count} videos` : `${count} videos`}
+          onClick={e => toggle(tag, e.ctrlKey || e.metaKey ? 'any' : 'all')} onContextMenu={e => { e.preventDefault(); toggle(tag, 'none'); }}
+          onKeyDown={e => { if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); toggle(tag, 'none'); } }}>{state === 'any' && <span className="tag-mark">~</span>}<span className="tag-name">{tag}</span><small>{count}</small></button>;
+      })}{!shown.length && <p className="muted tag-empty">{counts.length ? 'No matching tags.' : 'No tags yet.'}</p>}</div>
+      <div className="tag-panel-footer"><span>Click: must have · Ctrl+click: any of · Right-click: exclude</span>
+        <button type="button" className={`text-button${untagged ? ' active' : ''}`} aria-pressed={untagged} onClick={() => onChange(untagged ? null : { field: String(field.id), op: 'empty' })}>No tags</button>
+        <button type="button" className="text-button muted" disabled={!rule} onClick={() => onChange(null)}>Clear</button></div>
+    </div></>}
   </div>;
 }
 
@@ -139,6 +174,9 @@ export default function App() {
   const [editing, setEditing] = useState<{ id: number; field: string; original: string } | null>(null);
   const editingRef = useRef(editing);
   const [cellValue, setCellValue] = useState('');
+  const [tagDraft, setTagDraft] = useState<{ id: number; field: string } | null>(null);
+  const tagDraftRef = useRef(tagDraft);
+  const [tagText, setTagText] = useState('');
 
   const load = (snapshot: Snapshot) => { setData(snapshot); setSelected(new Set()); setPlayer(snapshot.player); setFormat(snapshot.playlist_format); };
   async function run<T,>(payload: Record<string, unknown>, done?: (value: T) => void, message = 'Done.') {
@@ -385,7 +423,7 @@ export default function App() {
           </div>
         </div>
         {showFilters && <div className="filter-grid">
-          {filterFields.map(field => {
+          {filterFields.map((field, index) => {
             const rule = activeRules.find(r => String(r.field) === String(field.id));
             const numeric = field.kind === 'number' || field.kind === 'date' || field.kind === 'rating';
             const values = [...new Set(data.videos.flatMap(v => { const value = v.values[String(field.id)]; return Array.isArray(value) ? value.map(text) : value == null ? [] : [text(value)]; }))].sort((a, b) => a.localeCompare(b));
@@ -393,6 +431,7 @@ export default function App() {
               {numeric ? <div className="numeric-filter"><select aria-label={`${field.name} comparison`} value={rule?.op || comparisons[String(field.id)] || 'gte'} onChange={e => { const op = e.target.value as Rule['op']; setComparisons({ ...comparisons, [String(field.id)]: op }); setRule(field, op === 'empty' || rule?.value != null && rule.value !== '' ? { field: String(field.id), op, value: rule?.value } : null); }}><option value="gte">At least</option><option value="lte">At most</option><option value="eq">Equals</option><option value="empty">{field.kind === 'rating' ? 'Not rated' : 'Empty'}</option></select>
                 {field.kind === 'rating' ? <select id={`filter-${field.id}`} aria-label={`${field.name} filter`} disabled={rule?.op === 'empty'} value={rule?.op === 'empty' ? '' : text(rule?.value)} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: rule?.op || comparisons[String(field.id)] || 'gte', value: Number(e.target.value) } : null)}><option value="">Any</option>{ratingSteps.map(n => <option key={n} value={n}>{n} ★</option>)}</select>
                 : <input id={`filter-${field.id}`} aria-label={`${field.name} filter`} disabled={rule?.op === 'empty'} placeholder="Any" type={field.kind === 'date' ? 'date' : 'number'} value={rule?.op === 'empty' ? '' : text(rule?.value)} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: rule?.op || comparisons[String(field.id)] || 'gte', value: field.kind === 'number' ? Number(e.target.value) : e.target.value } : null)} />}{rule && <button className="clear-inline" aria-label={`Clear ${field.name} filter`} onClick={() => setRule(field, null)}><X size={12} /></button>}</div>
+                : field.kind === 'tags' ? <TagFilter field={field} videos={data.videos} rule={rule} onChange={r => setRule(field, r)} alignRight={index % 6 >= 3} />
                 : <select id={`filter-${field.id}`} aria-label={`${field.name} filter`} value={rule ? rule.op === 'empty' ? 'empty' : `v:${text(rule.value)}` : ''} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: e.target.value === 'empty' ? 'empty' : 'eq', value: e.target.value.slice(2) } : null)}><option value="">Any</option><option value="empty">Empty</option>{values.map(v => <option key={v} value={`v:${v}`}>{v}</option>)}</select>}
             </div>;
           })}
@@ -429,6 +468,21 @@ export default function App() {
               if (kind === 'rating') return <td key={key} className={`rating-cell${open ? ' rating-editable' : ''}`} {...hold}>{open
                 ? <span className="star-display"><StarTrack label={`${fieldsById.get(key)?.name} rating`} value={typeof value === 'number' ? value : null} onChange={v => saveCell(video.id, key, v == null ? '' : String(v))} /><small>{typeof value === 'number' ? value : ''}</small>{typeof value === 'number' && <button className="icon-button clear-rating" aria-label="Clear rating" title="Clear rating (not rated)" onClick={() => saveCell(video.id, key, '')}><X size={11} /></button>}</span>
                 : <StarDisplay value={value} />}</td>;
+              if (kind === 'tags' && open) {
+                const tags = Array.isArray(value) ? value.map(text) : [];
+                const name = fieldsById.get(key)?.name;
+                const save = (next: string[]) => saveCell(video.id, key, next.join(', '));
+                const add = () => { const extra = tagText.split(',').map(t => t.trim()).filter((t, i, all) => t && !tags.includes(t) && all.indexOf(t) === i); setTagText(''); if (extra.length) save([...tags, ...extra]); };
+                const closeDraft = () => { tagDraftRef.current = null; setTagDraft(null); setTagText(''); };
+                const adding = tagDraft?.id === video.id && tagDraft.field === key;
+                return <td key={key} className="tag-cell-editable" title={tags.join(', ')} {...hold}><span className="tag-list tag-list-edit">
+                  {tags.map(t => <span className="tag-chip tag-chip-edit" key={t}><span>{t}</span><button type="button" className="tag-remove" aria-label={`Remove tag ${t}`} title="Remove tag" onClick={() => save(tags.filter(x => x !== t))}><X size={10} /></button></span>)}
+                  {adding ? <input autoFocus className="tag-input" aria-label={`New ${name} tag`} placeholder="New tag" value={tagText} onChange={e => setTagText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } else if (e.key === 'Escape') { e.preventDefault(); closeDraft(); } }}
+                    onBlur={() => { if (!tagDraftRef.current) return; add(); closeDraft(); }} />
+                    : <button type="button" className="tag-add" aria-label={`Add ${name} tag`} title="Add tag" onClick={() => { const next = { id: video.id, field: key }; tagDraftRef.current = next; setTagText(''); setTagDraft(next); }}><Plus size={9} strokeWidth={2.6} /></button>}
+                </span></td>;
+              }
               if (editing?.id === video.id && editing.field === key) return <td key={key} className="editing-cell" {...hold}><input autoFocus className="cell-input" aria-label={`Edit ${fieldsById.get(key)?.name}`} type={kind === 'number' ? 'number' : kind === 'date' ? 'date' : 'text'} placeholder={kind === 'tags' ? 'Tag A, Tag B' : ''} value={cellValue} onFocus={e => e.target.select()} onChange={e => setCellValue(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitCell(); } else if (e.key === 'Escape') { e.preventDefault(); editingRef.current = null; setEditing(null); } }} onBlur={commitCell} /></td>;
               return <td key={key} className={`${kind === 'number' ? 'numeric score-cell' : ''}${open ? ' editable-cell' : ''}`} title={text(value) || (open ? 'Click to edit' : undefined)} {...hold} onClick={open ? e => { if (e.shiftKey) return; e.stopPropagation(); startEdit(video.id, key, value); } : undefined}>{Array.isArray(value) ? <span className="tag-list">{value.slice(0, 2).map((v, n) => <span className="tag-chip" key={n}>{text(v)}</span>)}{value.length > 2 && <small>+{value.length - 2}</small>}</span> : text(value) || <span className="empty-value">—</span>}</td>;
