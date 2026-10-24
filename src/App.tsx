@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, Eye, EyeOff, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
-import { cancel, chooseFile, chooseFolder, desktop, request } from './bridge';
-import { filename, moveKey, moveKeys, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, Eye, EyeOff, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
+import { cancel, chooseFile, chooseFolder, confirmAction, desktop, request } from './bridge';
+import { builtinColumnKeys, builtinFilters, builtinLabels, durationText, qualityClasses, qualityOf, resolutionText, filename, filterValue, folderOf, formatOf, localTime, moveKey, moveKeys, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
 
 type Panel = null | 'sources' | 'field' | 'edit' | 'move' | 'options' | 'history' | 'save' | 'detail';
 const ratingFitWidth = 110;
+/** A filter is either a user field or a built-in column (string id). */
+type FilterField = { id: number | string; name: string; kind: Field['kind'] };
 const kinds = { text: 'Text', number: 'Number', date: 'Date', tags: 'Tags · multiple values', rating: 'Rating · 0–5 stars' };
 const imageCache = new Map<string, string>();
 
@@ -101,6 +103,57 @@ function TagFilter({ field, videos, rule, onChange, alignRight }: { field: Field
   </div>;
 }
 
+type BubblePosition = { left: number; top: number };
+/** Keeps the bubble inside the window, above the status bar. */
+function clampBubble(position: BubblePosition, element: HTMLElement | null): BubblePosition {
+  const width = element?.offsetWidth || 0, height = element?.offsetHeight || 0;
+  const clamp = (value: number, max: number) => Math.round(Math.min(Math.max(4, value), Math.max(4, max)));
+  return { left: clamp(position.left, window.innerWidth - width - 4), top: clamp(position.top, window.innerHeight - 30 - height - 4) };
+}
+
+/**
+ * Floating selection actions. Fixed to the window so scrolling never moves it; drag it by its body.
+ * It starts left of `anchor` (the list search box); a dragged position lasts for this app session only.
+ */
+function SelectionBubble({ count, busy, anchor, position, onMove, onClear, onPlay, onResetPlays, onBulkEdit, onOrganize }: {
+  count: number; busy: boolean; anchor: RefObject<HTMLElement | null>; position: BubblePosition | null; onMove: (position: BubblePosition) => void;
+  onClear: () => void; onPlay: () => void; onResetPlays: () => void; onBulkEdit: () => void; onOrganize: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [initial, setInitial] = useState<BubblePosition | null>(null);
+  const shown = position || initial;
+  useLayoutEffect(() => {
+    if (position || initial || !ref.current) return;
+    const box = anchor.current?.getBoundingClientRect();
+    const own = ref.current.getBoundingClientRect();
+    setInitial(clampBubble(box ? { left: box.left - 12 - own.width, top: box.top + (box.height - own.height) / 2 } : { left: window.innerWidth - own.width - 24, top: 80 }, ref.current));
+  }, [position, initial, anchor]);
+  useEffect(() => {
+    const resize = () => { if (shown) onMove(clampBubble(shown, ref.current)); };
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, [shown, onMove]);
+  function startDrag(e: PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0 || !shown || (e.target as Element).closest('button')) return;
+    e.preventDefault();
+    const element = e.currentTarget, startX = e.clientX, startY = e.clientY, start = shown;
+    const move = (ev: globalThis.PointerEvent) => onMove(clampBubble({ left: start.left + ev.clientX - startX, top: start.top + ev.clientY - startY }, ref.current));
+    const end = () => { element.removeEventListener('pointermove', move); element.removeEventListener('pointerup', end); element.removeEventListener('pointercancel', end); };
+    element.setPointerCapture(e.pointerId);
+    element.addEventListener('pointermove', move); element.addEventListener('pointerup', end); element.addEventListener('pointercancel', end);
+  }
+  return <div ref={ref} className="selection-bubble" role="toolbar" aria-label="Selected videos" title="Drag to move" style={shown ? { left: shown.left, top: shown.top } : { left: 0, top: 0, visibility: 'hidden' }} onPointerDown={startDrag}>
+    <GripVertical size={14} className="bubble-grip" />
+    <button type="button" className="selected-toggle" aria-label={`${count} selected. Clear selection`} title="Clear selection" onClick={onClear}>
+      <span className="sel-count"><CheckSquare size={14} />{count} selected</span><span className="sel-clear"><X size={14} />Clear</span>
+    </button>
+    <button type="button" disabled={busy} onClick={onPlay}><Play size={14} />Play</button>
+    <button type="button" className="icon-only" disabled={busy} aria-label="Reset plays" title="Reset plays" onClick={onResetPlays}><RotateCcw size={14} /></button>
+    <button type="button" disabled={busy} title="Set one field value on all selected videos" onClick={onBulkEdit}><Tag size={14} />Bulk edit</button>
+    <button type="button" className="primary" disabled={busy} onClick={onOrganize}><FolderOpen size={14} />Organize folders</button>
+  </div>;
+}
+
 function Modal({ title, subtitle, children, onClose, wide = false }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
@@ -170,6 +223,8 @@ export default function App() {
   const [dragOver, setDragOver] = useState<string | null>(null);
   const anchor = useRef<number | null>(null);
   const tableRef = useRef<HTMLTableElement>(null);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const [bubblePosition, setBubblePosition] = useState<BubblePosition | null>(null);
   const [columnSelection, setColumnSelection] = useState<string[]>([]);
   const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; keys: string[] } | null>(null);
   const [unhide, setUnhide] = useState<{ x: number; y: number; chosen: string[] } | null>(null);
@@ -199,6 +254,15 @@ export default function App() {
   function saveCell(id: number, field: string, value: string) {
     if (busyRef.current) { setError('Wait for the current operation to finish, then edit again.'); return; }
     void run<Snapshot>({ action: 'set_values', ids: [id], field: Number(field), value }, setData, 'Field value saved.');
+  }
+  // Play requests return a fresh snapshot with updated play counts; setData keeps the selection.
+  function playVideos(ids: number[], playlist: boolean) {
+    void run<Snapshot>({ action: 'play', ids, playlist }, setData, playlist ? 'Opened a new playlist with the selected videos.' : 'Video opened.');
+  }
+  async function resetPlays(ids: number[]) {
+    const label = ids.length === 1 ? 'this video' : `${ids.length} videos`;
+    if (!await confirmAction(`Reset the play count and last played time of ${label}?`)) return;
+    await run<Snapshot>({ action: 'reset_plays', ids }, setData, 'Play counts reset.');
   }
   function startEdit(id: number, field: string, value: unknown) {
     const next = { id, field, original: text(value) };
@@ -246,22 +310,23 @@ export default function App() {
   const chosen = rows.filter(r => selected.has(r.id));
   const detail = data?.videos.find(v => v.id === detailId);
   const fieldsById = new Map((data?.fields || []).map(f => [String(f.id), f]));
-  const filterOrder = ordered([...fieldsById.keys()], data?.filter_order);
-  const filterFields = filterOrder.map(key => fieldsById.get(key)!).slice(0, allFilters ? undefined : visibleFields);
-  const columnOrder = ordered(['name', ...fieldsById.keys(), 'size'], data?.column_order);
+  const builtinFilterById = new Map(builtinFilters.map(f => [f.id, f]));
+  const filterOrder = ordered([...fieldsById.keys(), ...builtinFilterById.keys()], data?.filter_order);
+  const filterFields: FilterField[] = filterOrder.map(key => fieldsById.get(key) || builtinFilterById.get(key)!).slice(0, allFilters ? undefined : visibleFields);
+  const columnOrder = ordered(['name', ...fieldsById.keys(), ...builtinColumnKeys], data?.column_order);
   let shownFieldColumns = 0;
   // Hidden columns keep their order and width settings, so showing them again restores both.
   const hiddenColumns = data?.hidden_columns || [];
-  const shownColumns = columnOrder.filter(key => key === 'name' || key === 'size' || shownFieldColumns++ < visibleFields);
+  const shownColumns = columnOrder.filter(key => key in builtinLabels || shownFieldColumns++ < visibleFields);
   const columns = shownColumns.filter(key => !hiddenColumns.includes(key));
   const hiddenShown = shownColumns.filter(key => hiddenColumns.includes(key));
-  const columnLabel = (key: string) => key === 'name' ? 'File name' : key === 'size' ? 'Size' : fieldsById.get(key)?.name || key;
+  const columnLabel = (key: string) => builtinLabels[key] || fieldsById.get(key)?.name || key;
   const activeRules = query.rules || [];
   // Until a column is resized the table fills the width; afterwards every column uses an exact pixel width.
   const customWidths = Object.keys(data?.column_widths || {}).length > 0;
   const defaultWidth = (key: string) => {
     const kind = fieldsById.get(key)?.kind;
-    return key === 'name' ? 280 : key === 'size' || kind === 'number' ? 85 : kind === 'rating' ? 130 : kind === 'date' ? 110 : 150;
+    return ({ name: 280, duration: 80, resolution: 100, size: 85, plays: 70, last_played: 130, format: 70, folder: 220 } as Record<string, number>)[key] ?? (kind === 'number' ? 85 : kind === 'rating' ? 130 : kind === 'date' ? 110 : 150);
   };
   const widthOf = (key: string) => data?.column_widths[key] ?? defaultWidth(key);
   const tableWidth = 42 + 32 + columns.reduce((sum, key) => sum + widthOf(key), 0);
@@ -318,6 +383,12 @@ export default function App() {
     const content = (video: Video) => {
       if (key === 'name') return 14 + 8 + measure(filename(video.path), 11, 500);
       if (key === 'size') return measure(size(video.size), 10);
+      if (key === 'plays') return measure(String(video.plays || '—'), 11, 650);
+      if (key === 'duration') return measure(durationText(video.duration_ms) || '—', 11);
+      if (key === 'resolution') return measure(resolutionText(video) || '—', 11);
+      if (key === 'last_played') return measure(localTime(video.last_played) || '—', 11);
+      if (key === 'format') return measure(formatOf(video.path), 10, 600);
+      if (key === 'folder') return measure(folderOf(video.path), 11);
       const value = video.values[key];
       if (Array.isArray(value)) {
         const chips = value.slice(0, 2).map(v => Math.min(80, measure(text(v), 10) + 10));
@@ -325,7 +396,7 @@ export default function App() {
       }
       return measure(text(value) || '—', 11, field?.kind === 'number' ? 650 : 400);
     };
-    const label = key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name || key;
+    const label = columnLabel(key);
     const widest = Math.max(measure(label, 10, 600) + 6 + 12, ...data.videos.map(content));
     const { widths, apply } = frozenWidths(table);
     // Rating cells always hold five stars plus a short score, so they fit to a fixed width.
@@ -413,7 +484,7 @@ export default function App() {
   const dragGroup = drag?.kind === 'column' && columnSelection.includes(drag.key) ? columnSelection : [];
   const dragClass = (kind: 'column' | 'filter', key: string) => drag?.kind !== kind ? '' : drag.key === key || (kind === 'column' && dragGroup.includes(key)) ? ' dragging' : dragOver === key ? ' drag-over' : '';
   const changeQuery = (q: Query) => { setQuery(q); setPage(0); setSelected(new Set()); setPreset(''); };
-  const setRule = (field: Field, rule: Rule | null) => changeQuery({ ...query, rules: [...activeRules.filter(r => String(r.field) !== String(field.id)), ...(rule ? [rule] : [])] });
+  const setRule = (field: FilterField, rule: Rule | null) => changeQuery({ ...query, rules: [...activeRules.filter(r => String(r.field) !== String(field.id)), ...(rule ? [rule] : [])] });
   const close = () => { if (!busy) setPanel(null); };
 
   async function openWorkspace() {
@@ -518,40 +589,45 @@ export default function App() {
           {filterFields.map((field, index) => {
             const rule = activeRules.find(r => String(r.field) === String(field.id));
             const numeric = field.kind === 'number' || field.kind === 'date' || field.kind === 'rating';
-            const values = [...new Set(data.videos.flatMap(v => { const value = v.values[String(field.id)]; return Array.isArray(value) ? value.map(text) : value == null ? [] : [text(value)]; }))].sort((a, b) => a.localeCompare(b));
+            const builtin = typeof field.id === 'string';
+            const values = [...new Set(data.videos.flatMap(v => { const value = filterValue(v, String(field.id)); return Array.isArray(value) ? value.map(text) : value == null ? [] : [text(value)]; }))].sort((a, b) => field.id === 'resolution' ? qualityClasses.indexOf(a) - qualityClasses.indexOf(b) : a.localeCompare(b));
             return <div className={`filter-cell ${rule ? 'filter-active' : ''}${dragClass('filter', String(field.id))}`} key={field.id} {...dropTarget('filter', String(field.id))}><label htmlFor={`filter-${field.id}`} {...dragSource('filter', String(field.id))}><GripVertical size={11} className="grip" />{field.name}{rule && <i />}</label>
-              {numeric ? <div className="numeric-filter"><select aria-label={`${field.name} comparison`} value={rule?.op || comparisons[String(field.id)] || 'gte'} onChange={e => { const op = e.target.value as Rule['op']; setComparisons({ ...comparisons, [String(field.id)]: op }); setRule(field, op === 'empty' || rule?.value != null && rule.value !== '' ? { field: String(field.id), op, value: rule?.value } : null); }}><option value="gte">At least</option><option value="lte">At most</option><option value="eq">Equals</option><option value="empty">{field.kind === 'rating' ? 'Not rated' : 'Empty'}</option></select>
+              {numeric ? <div className="numeric-filter"><select aria-label={`${field.name} comparison`} value={rule?.op || comparisons[String(field.id)] || 'gte'} onChange={e => { const op = e.target.value as Rule['op']; setComparisons({ ...comparisons, [String(field.id)]: op }); setRule(field, op === 'empty' || rule?.value != null && rule.value !== '' ? { field: String(field.id), op, value: rule?.value } : null); }}><option value="gte">At least</option><option value="lte">At most</option><option value="eq">Equals</option>{field.id !== 'plays' && <option value="empty">{field.kind === 'rating' ? 'Not rated' : field.id === 'last_played' ? 'Never played' : 'Empty'}</option>}</select>
                 {field.kind === 'rating' ? <select id={`filter-${field.id}`} aria-label={`${field.name} filter`} disabled={rule?.op === 'empty'} value={rule?.op === 'empty' ? '' : text(rule?.value)} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: rule?.op || comparisons[String(field.id)] || 'gte', value: Number(e.target.value) } : null)}><option value="">Any</option>{ratingSteps.map(n => <option key={n} value={n}>{n} ★</option>)}</select>
                 : <input id={`filter-${field.id}`} aria-label={`${field.name} filter`} disabled={rule?.op === 'empty'} placeholder="Any" type={field.kind === 'date' ? 'date' : 'number'} value={rule?.op === 'empty' ? '' : text(rule?.value)} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: rule?.op || comparisons[String(field.id)] || 'gte', value: field.kind === 'number' ? Number(e.target.value) : e.target.value } : null)} />}{rule && <button className="clear-inline" aria-label={`Clear ${field.name} filter`} onClick={() => setRule(field, null)}><X size={12} /></button>}</div>
-                : field.kind === 'tags' ? <TagFilter field={field} videos={data.videos} rule={rule} onChange={r => setRule(field, r)} alignRight={index % 6 >= 3} />
-                : <select id={`filter-${field.id}`} aria-label={`${field.name} filter`} value={rule ? rule.op === 'empty' ? 'empty' : `v:${text(rule.value)}` : ''} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: e.target.value === 'empty' ? 'empty' : 'eq', value: e.target.value.slice(2) } : null)}><option value="">Any</option><option value="empty">Empty</option>{values.map(v => <option key={v} value={`v:${v}`}>{v}</option>)}</select>}
+                : field.kind === 'tags' ? <TagFilter field={field as Field} videos={data.videos} rule={rule} onChange={r => setRule(field, r)} alignRight={index % 6 >= 3} />
+                : <select id={`filter-${field.id}`} aria-label={`${field.name} filter`} value={rule ? rule.op === 'empty' ? 'empty' : `v:${text(rule.value)}` : ''} onChange={e => setRule(field, e.target.value ? { field: String(field.id), op: e.target.value === 'empty' ? 'empty' : 'eq', value: e.target.value.slice(2) } : null)}><option value="">Any</option>{!builtin && <option value="empty">Empty</option>}{values.map(v => <option key={v} value={`v:${v}`}>{v}</option>)}</select>}
             </div>;
           })}
           {!data.fields.length && <div className="filter-onboarding"><Tag size={16} /><span>Add a field to filter by it here.</span><button className="text-button" onClick={() => openPanel('field')}>Add field</button></div>}
-          {data.fields.length > visibleFields && <button className="text-button more-filters" onClick={() => setAllFilters(!allFilters)}>{allFilters ? 'Show default filters only' : `Show ${data.fields.length - visibleFields} more filters`}</button>}
+          {filterOrder.length > visibleFields && <button className="text-button more-filters" onClick={() => setAllFilters(!allFilters)}>{allFilters ? 'Show default filters only' : `Show ${filterOrder.length - visibleFields} more filters`}</button>}
         </div>}
         {activeRules.length > 0 && <div className="filter-summary"><span>{query.mode === 'OR' ? 'Match any condition' : 'Match all conditions'}</span><button className="text-button" onClick={() => changeQuery({ ...query, mode: query.mode === 'OR' ? 'AND' : 'OR' })}>Toggle AND / OR</button></div>}
       </section>
 
       <section className="results">
         <div className="results-toolbar"><div className="result-tabs"><button className={view === 'list' ? 'tab active' : 'tab'} onClick={() => setView('list')}><List size={15} />List</button><button className={view === 'gallery' ? 'tab active' : 'tab'} onClick={() => setView('gallery')}><Grid2X2 size={14} />Covers</button><span className="result-total">{rows.length.toLocaleString()}<span> / {data.videos.length.toLocaleString()}</span></span></div>
-          <div className="search-box"><Search size={15} /><input aria-label="Search videos" placeholder="Search file name, path, or field values" value={query.search || ''} onChange={e => changeQuery({ ...query, search: e.target.value })} />{query.search && <button className="icon-button" aria-label="Clear search" onClick={() => changeQuery({ ...query, search: '' })}><X size={13} /></button>}</div>
+          <div className="search-box" ref={searchRef}><Search size={15} /><input aria-label="Search videos" placeholder="Search file name, path, or field values" value={query.search || ''} onChange={e => changeQuery({ ...query, search: e.target.value })} />{query.search && <button className="icon-button" aria-label="Clear search" onClick={() => changeQuery({ ...query, search: '' })}><X size={13} /></button>}</div>
         </div>
-        {selected.size > 0 && <div className="selection-bar"><div><CheckSquare size={15} /><strong>{selected.size} selected</strong><button className="text-button" onClick={() => setSelected(new Set())}>Clear</button></div><div>
-          <button disabled={busy} onClick={() => void run({ action: 'play', ids: chosen.map(v => v.id), playlist: true }, undefined, 'Opened a new playlist with the selected videos.')}><Play size={14} />Play</button>
-          <button disabled={busy} onClick={() => openPanel('edit')}><Tag size={14} />Edit fields</button>
-          <button className="primary" disabled={busy} onClick={() => openPanel('move')}><FolderOpen size={14} />Organize folders</button>
-        </div></div>}
+        {selected.size > 0 && <SelectionBubble count={selected.size} busy={busy} anchor={searchRef} position={bubblePosition} onMove={setBubblePosition}
+          onClear={() => setSelected(new Set())} onPlay={() => playVideos(chosen.map(v => v.id), true)} onResetPlays={() => void resetPlays(chosen.map(v => v.id))}
+          onBulkEdit={() => openPanel('edit')} onOrganize={() => openPanel('move')} />}
 
         {view === 'list' ? <div className="table-container"><table ref={tableRef} style={customWidths ? { width: tableWidth } : undefined}><thead onContextMenu={openColumnMenu}><tr><th className="checkbox-col"><input type="checkbox" aria-label="Select all on this page" checked={pageRows.length > 0 && pageRows.every(v => selected.has(v.id))} onChange={e => setSelected(prev => { const next = new Set(prev); pageRows.forEach(v => e.target.checked ? next.add(v.id) : next.delete(v.id)); return next; })} /></th>{columns.map(key => {
             const field = fieldsById.get(key);
-            const className = key === 'name' ? 'filename-col' : key === 'size' || field?.kind === 'number' ? 'numeric' : '';
-            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}${columnSelection.includes(key) ? ' col-selected' : ''}`} {...dragSource('column', key)} {...dropTarget('column', key)} title="Click to select · Ctrl+click to add · Ctrl+Shift+click for a range · Drag to move · Right-click for options" onClick={e => clickHeader(e, key)}><button title="Click to sort" onClick={e => clickHeaderName(e, key)}>{key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${key === 'name' ? 'File name' : key === 'size' ? 'Size' : field?.name} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
+            const className = key === 'name' ? 'filename-col' : key === 'size' || key === 'plays' || key === 'duration' || field?.kind === 'number' ? 'numeric' : '';
+            return <th key={key} data-col={key} style={customWidths ? { width: widthOf(key) } : undefined} className={`draggable-col ${className}${dragClass('column', key)}${columnSelection.includes(key) ? ' col-selected' : ''}`} {...dragSource('column', key)} {...dropTarget('column', key)} title="Click to select · Ctrl+click to add · Ctrl+Shift+click for a range · Drag to move · Right-click for options" onClick={e => clickHeader(e, key)}><button title="Click to sort" onClick={e => clickHeaderName(e, key)}>{columnLabel(key)}{sortIcon(key)}</button><span className="col-resizer" role="separator" aria-orientation="vertical" aria-label={`Resize ${columnLabel(key)} column`} title="Drag to resize · Double-click to fit" onPointerDown={e => startResize(e, key)} onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); autoFit(key); }} /></th>;
           })}<th className="actions-col" /></tr></thead>
-          <tbody>{pageRows.map(video => <tr key={video.id} className={selected.has(video.id) ? 'row-selected' : ''} onClick={e => toggleSelection(video, e.shiftKey)} onDoubleClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}>
+          <tbody>{pageRows.map(video => <tr key={video.id} className={selected.has(video.id) ? 'row-selected' : ''} onClick={e => toggleSelection(video, e.shiftKey)} onDoubleClick={() => playVideos([video.id], false)}>
             <td><input type="checkbox" aria-label={`Select ${filename(video.path)}`} checked={selected.has(video.id)} onChange={() => toggleSelection(video)} onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} /></td>{columns.map(key => {
               if (key === 'name') return <td key={key} className="filename-cell" title={video.path}><span><FileVideo size={14} /><strong>{filename(video.path)}</strong></span></td>;
               if (key === 'size') return <td key={key} className="numeric size-cell">{size(video.size)}</td>;
+              if (key === 'plays') return <td key={key} className="numeric plays-cell">{video.plays || <span className="empty-value">—</span>}</td>;
+              if (key === 'duration') return <td key={key} className="numeric date-cell">{durationText(video.duration_ms) || <span className="empty-value">—</span>}</td>;
+              if (key === 'resolution') return <td key={key} className="date-cell" title={qualityOf(video) || undefined}>{resolutionText(video) || <span className="empty-value">—</span>}</td>;
+              if (key === 'last_played') return <td key={key} className="date-cell" title={localTime(video.last_played)}>{localTime(video.last_played) || <span className="empty-value">—</span>}</td>;
+              if (key === 'format') return <td key={key}><span className="pill">{formatOf(video.path)}</span></td>;
+              if (key === 'folder') return <td key={key} className="folder-cell" title={folderOf(video.path)}>{folderOf(video.path)}</td>;
               const value = video.values[key];
               const kind = fieldsById.get(key)?.kind;
               const open = selected.has(video.id);
@@ -582,7 +658,7 @@ export default function App() {
           </tr>)}</tbody></table></div>
           : <div className="gallery">{pageRows.map(video => <div className={`gallery-card ${selected.has(video.id) ? 'card-selected' : ''}`} key={video.id}>
             <button className="cover-button" aria-label={`Details for ${filename(video.path)}`} onClick={() => { setDetailId(video.id); setDetailImage(0); setPanel('detail'); }}><Cover image={video.images.find(i => i.cover)} workspace={data.root} /></button>
-            <label className="card-title"><input type="checkbox" checked={selected.has(video.id)} onChange={() => toggleSelection(video)} /> <span title={video.path}>{filename(video.path)}</span></label><div className="card-meta"><span>{size(video.size)}</span><button className="text-button" disabled={busy} onClick={() => void run({ action: 'play', ids: [video.id], playlist: false }, undefined, 'Video opened.')}><Play size={12} />Play</button></div>
+            <label className="card-title"><input type="checkbox" checked={selected.has(video.id)} onChange={() => toggleSelection(video)} /> <span title={video.path}>{filename(video.path)}</span></label><div className="card-meta"><span>{size(video.size)}</span><button className="text-button" disabled={busy} onClick={() => playVideos([video.id], false)}><Play size={12} />Play</button></div>
           </div>)}</div>}
         {!rows.length && <div className="empty-results">{data.videos.length ? <><Search size={28} /><h3>No videos match these conditions</h3><p>Try changing the filters or search terms.</p><button onClick={() => changeQuery({ search: '', rules: [], mode: 'AND' })}>Reset conditions</button></> : <><FolderPlus size={30} /><h3>Add your first source folder</h3><p>Videos in the folder will be loaded.</p><button className="primary" onClick={() => openPanel('sources')}>Add folder</button></>}</div>}
         <footer className="table-footer"><span>{selected.size ? `${selected.size} selected · ` : ''}{pageSize} per page<span className="footer-tip">Double-click to play · Shift-click to select a range · Click a field of a selected row to edit · Right-click a column header to hide columns</span></span><div><button className="icon-button" aria-label="Previous page" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}><ChevronLeft size={16} /></button><strong>{currentPage + 1}</strong><span>/ {pages}</span><button className="icon-button" aria-label="Next page" disabled={currentPage + 1 >= pages} onClick={() => setPage(currentPage + 1)}><ChevronRight size={16} /></button></div></footer>
@@ -601,7 +677,7 @@ export default function App() {
       <label className="form-field">Name<input autoFocus placeholder="e.g. Score, Genre, Release date" value={name} onChange={e => setName(e.target.value)} maxLength={60} /></label><label className="form-field">Type<select value={kind} onChange={e => setKind(e.target.value)}>{Object.entries(kinds).map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select></label>
       <div className="modal-actions"><button onClick={close}>Cancel</button><button className="primary" disabled={busy || !name.trim()} onClick={() => void run<Snapshot>({ action: 'add_field', name, kind }, s => { load(s); setPanel(null); }, 'Field added.')}>Add field</button></div>
     </Modal>}
-    {panel === 'edit' && data && <Modal title="Edit field values" subtitle={`Apply the same value to ${chosen.length} selected ${chosen.length === 1 ? 'video' : 'videos'}.`} onClose={close}>
+    {panel === 'edit' && data && <Modal title="Bulk edit fields" subtitle={`Apply the same value to ${chosen.length} selected ${chosen.length === 1 ? 'video' : 'videos'}.`} onClose={close}>
       {data.fields.length ? <><label className="form-field">Field<select value={fieldId} onChange={e => { setFieldId(e.target.value); setEditValue(chosen.length === 1 ? text(chosen[0].values[e.target.value]) : ''); }}>{data.fields.map(f => <option key={f.id} value={f.id}>{f.name} · {kinds[f.kind]}</option>)}</select></label>{selectedField?.kind === 'rating' ? <div className="form-field">Value<StarInput value={editValue === '' ? null : Number(editValue)} onChange={v => setEditValue(v == null ? '' : String(v))} /></div>
         : <label className="form-field">Value<input autoFocus type={selectedField?.kind === 'number' ? 'number' : selectedField?.kind === 'date' ? 'date' : 'text'} value={editValue} placeholder={selectedField?.kind === 'tags' ? 'Tag A, Tag B' : 'Enter a value'} onChange={e => setEditValue(e.target.value)} /></label>}<p className="form-hint">{selectedField?.kind === 'rating' ? 'Click the left half of a star for a half star. Clear saves “not rated”, which is different from 0 stars.' : 'Saving an empty value clears the existing value of this field.'}</p><div className="modal-actions"><button onClick={close}>Cancel</button><button className="primary" disabled={busy} onClick={() => void run<Snapshot>({ action: 'set_values', ids: chosen.map(v => v.id), field: Number(fieldId), value: editValue }, s => { load(s); setPanel(null); }, 'Field values saved.')}>Apply to selected videos</button></div></>
         : <div className="modal-empty"><Tag size={28} /><p>Create a field first.</p><button className="primary" onClick={() => openPanel('field')}>Add field</button></div>}
@@ -634,7 +710,7 @@ export default function App() {
       <section className="options-section"><h3>Startup</h3><label className="check-label"><input type="checkbox" checked={reopenLast} onChange={e => setReopenLast(e.target.checked)} />Reopen the last workspace when Filterer starts</label><p className="form-hint">Applies to all workspaces. When off, Filterer starts on the welcome screen.</p></section>
       <section className="options-section"><h3>Organizing folders</h3><div className="move-controls"><label className="form-field">Folder for videos without a value<input value={draft.unclassified_folder} maxLength={100} onChange={e => setDraft({ ...draft, unclassified_folder: e.target.value })} /></label><label className="form-field">Default shared folder for multiple values<input value={draft.shared_folder} maxLength={100} onChange={e => setDraft({ ...draft, shared_folder: e.target.value })} /></label></div><p className="form-hint">Used under {data.root}\videos\. Existing folders are not renamed.</p></section>
       <section className="options-section"><h3>List and filters</h3><div className="move-controls"><label className="form-field">Rows per page<select value={draft.page_size} onChange={e => setDraft({ ...draft, page_size: Number(e.target.value) })}>{pageSizes.map(n => <option key={n} value={n}>{n}</option>)}</select></label><label className="form-field">Default filters and columns<input type="number" min={1} max={50} value={draft.visible_fields} onChange={e => setDraft({ ...draft, visible_fields: Number(e.target.value) })} /></label></div><p className="form-hint">The first fields in filter and column order are shown by default. The rest open with “Show more filters”.</p>
-        {([['column', 'Column order', columnOrder.map(key => key === 'name' ? 'File name' : key === 'size' ? 'Size' : fieldsById.get(key)?.name || key)], ['filter', 'Filter order', filterOrder.map(key => fieldsById.get(key)?.name || key)]] as const).map(([kind, label, names]) => <div className="order-row" key={kind}><div><strong>{label}</strong><span title={names.join(' · ')}>{resetOrder[kind] ? 'Resets to the default order when saved' : names.join(' · ') || 'No fields yet'}</span></div><button disabled={busy || resetOrder[kind] || !data[`${kind}_order`].length} onClick={() => setResetOrder({ ...resetOrder, [kind]: true })}><RefreshCw size={13} />Reset to default</button></div>)}
+        {([['column', 'Column order', columnOrder.map(columnLabel)], ['filter', 'Filter order', filterOrder.map(columnLabel)]] as const).map(([kind, label, names]) => <div className="order-row" key={kind}><div><strong>{label}</strong><span title={names.join(' · ')}>{resetOrder[kind] ? 'Resets to the default order when saved' : names.join(' · ') || 'No fields yet'}</span></div><button disabled={busy || resetOrder[kind] || !data[`${kind}_order`].length} onClick={() => setResetOrder({ ...resetOrder, [kind]: true })}><RefreshCw size={13} />Reset to default</button></div>)}
         <div className="order-row"><div><strong>Column widths</strong><span>{resetOrder.widths ? 'Resets to the default widths when saved' : Object.keys(data.column_widths).length ? 'Custom widths' : 'Default widths'}</span></div><button disabled={busy || resetOrder.widths || !Object.keys(data.column_widths).length} onClick={() => setResetOrder({ ...resetOrder, widths: true })}><RefreshCw size={13} />Reset to default</button></div>
         <p className="form-hint">To change the order, drag column headers or filter labels on the main screen. To change a width, drag the edge of a column header.</p></section>
       <section className="options-section"><h3>Player</h3><label className="form-field">Player executable<div className="input-with-button"><input value={player} onChange={e => setPlayer(e.target.value)} placeholder="Leave empty to use the OS default app" /><button disabled={busy} onClick={() => void chooseFile().then(p => { if (p) setPlayer(p); }).catch(e => setError(String(e)))}>Browse</button></div></label><label className="form-field">New playlist format<select value={format} onChange={e => setFormat(e.target.value)}><option value="m3u8">M3U8 · VLC / PotPlayer</option><option value="asx">ASX · Windows Media Player</option></select></label><p className="form-hint">If the default app cannot open the playlist, set the player executable.</p></section>
@@ -645,8 +721,8 @@ export default function App() {
       <div className="modal-actions"><button disabled={busy} onClick={() => void run<{ snapshot: Snapshot; remaining: number }>({ action: 'reconcile' }, r => { load(r.snapshot); if (r.remaining) setError(`${r.remaining} unresolved records: files present at both source and destination are never deleted automatically.`); }, 'Interrupted records reconciled with file locations.')}>Reconcile interrupted records</button><button onClick={close}>Close</button></div>
     </Modal>}
     {panel === 'detail' && data && detail && <Modal title={filename(detail.path)} subtitle={`${size(detail.size)} · ${detail.images.length} ${detail.images.length === 1 ? 'image' : 'images'}`} onClose={close} wide>
-      <div className="detail-layout"><div><Cover image={detail.images[detailImage]} workspace={data.root} large /><div className="image-pager"><button disabled={detailImage === 0} onClick={() => setDetailImage(detailImage - 1)}><ChevronLeft size={14} /></button><span>{detail.images.length ? detailImage + 1 : 0} / {detail.images.length}</span><button disabled={detailImage + 1 >= detail.images.length} onClick={() => setDetailImage(detailImage + 1)}><ChevronRight size={14} /></button></div></div><div><dl className="detail-fields"><dt>File location</dt><dd className="file-path">{detail.path}</dd>{data.fields.map(f => <div key={f.id}><dt>{f.name}</dt><dd>{f.kind === 'rating' ? <StarDisplay value={detail.values[String(f.id)]} /> : text(detail.values[String(f.id)]) || '—'}</dd></div>)}</dl><div className="image-actions"><button disabled={busy} onClick={() => void addImage(true)}><ImageIcon size={14} />Cover image</button><button disabled={busy} onClick={() => void addImage(false)}><Plus size={14} />Additional image</button></div></div></div>
-      <div className="modal-actions"><button onClick={close}>Close</button><button className="primary" disabled={busy} onClick={() => void run({ action: 'play', ids: [detail.id], playlist: false }, undefined, 'Video opened.')}><Play size={14} />Play this video</button></div>
+      <div className="detail-layout"><div><Cover image={detail.images[detailImage]} workspace={data.root} large /><div className="image-pager"><button disabled={detailImage === 0} onClick={() => setDetailImage(detailImage - 1)}><ChevronLeft size={14} /></button><span>{detail.images.length ? detailImage + 1 : 0} / {detail.images.length}</span><button disabled={detailImage + 1 >= detail.images.length} onClick={() => setDetailImage(detailImage + 1)}><ChevronRight size={14} /></button></div></div><div><dl className="detail-fields"><dt>File location</dt><dd className="file-path">{detail.path}</dd><div><dt>Duration</dt><dd>{durationText(detail.duration_ms) || '—'}</dd></div><div><dt>Resolution</dt><dd>{resolutionText(detail) || '—'}</dd></div><div><dt>Plays</dt><dd>{detail.plays || '—'}</dd></div><div><dt>Last played</dt><dd>{localTime(detail.last_played) || 'Never'}</dd></div>{data.fields.map(f => <div key={f.id}><dt>{f.name}</dt><dd>{f.kind === 'rating' ? <StarDisplay value={detail.values[String(f.id)]} /> : text(detail.values[String(f.id)]) || '—'}</dd></div>)}</dl><div className="image-actions"><button disabled={busy} onClick={() => void addImage(true)}><ImageIcon size={14} />Cover image</button><button disabled={busy} onClick={() => void addImage(false)}><Plus size={14} />Additional image</button></div></div></div>
+      <div className="modal-actions"><button disabled={busy || (!detail.plays && detail.last_played == null)} onClick={() => void resetPlays([detail.id])}><RotateCcw size={14} />Reset plays</button><button onClick={close}>Close</button><button className="primary" disabled={busy} onClick={() => playVideos([detail.id], false)}><Play size={14} />Play this video</button></div>
     </Modal>}
   </div>;
 }

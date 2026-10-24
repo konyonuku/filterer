@@ -2,6 +2,7 @@ use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use crate::media_info;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -115,7 +116,15 @@ pub struct Video {
     pub size: u64,
     pub values: Value,
     pub images: Vec<ImageRef>,
+    pub plays: i64,
+    /// Unix seconds of the last playback started from this app.
+    pub last_played: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
 }
+/// Built-in columns that start hidden when a workspace first gets them.
+const DEFAULT_HIDDEN_COLUMNS: &[&str] = &["last_played", "format", "folder"];
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Source {
     pub path: String,
@@ -222,7 +231,7 @@ impl Workspace {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .readable()?;
-        if version > 1 {
+        if version > 3 {
             return Err("This workspace is not supported by this version.".into());
         }
         db.execute_batch("CREATE TABLE IF NOT EXISTS roots(path TEXT PRIMARY KEY,recursive INTEGER NOT NULL);
@@ -232,15 +241,95 @@ impl Workspace {
             CREATE TABLE IF NOT EXISTS attachments(media_id INTEGER NOT NULL,path TEXT NOT NULL,UNIQUE(media_id,path));
             CREATE TABLE IF NOT EXISTS folders(name TEXT PRIMARY KEY,query TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,created TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);
-            PRAGMA user_version=1;").readable()?;
-        Ok(Self {
+            CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,created TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);").readable()?;
+        let mut ws = Self {
             root,
             meta,
             db,
             _lock: lock,
             preview: None,
-        })
+        };
+        if version < 2 {
+            ws.migrate_to_2()?;
+        }
+        if version < 3 {
+            ws.migrate_to_3()?;
+        }
+        Ok(ws)
+    }
+    /// Schema 3: duration and resolution, cached against the size and time they were read at.
+    fn migrate_to_3(&mut self) -> Result<()> {
+        let tx = self.db.transaction().readable()?;
+        tx.execute_batch(
+            "ALTER TABLE media ADD COLUMN duration_ms INTEGER;
+             ALTER TABLE media ADD COLUMN width INTEGER;
+             ALTER TABLE media ADD COLUMN height INTEGER;
+             ALTER TABLE media ADD COLUMN info_size INTEGER;
+             ALTER TABLE media ADD COLUMN info_modified INTEGER;
+             PRAGMA user_version=3;",
+        )
+        .readable()?;
+        tx.commit().readable()
+    }
+    /// Reads duration and resolution for videos that are new or changed since they were last read.
+    fn read_media_info(&mut self, cancel: &AtomicBool, progress: &dyn Fn(String)) -> Result<()> {
+        let pending: Vec<(i64, PathBuf, i64, i64)> = {
+            let mut q = self
+                .db
+                .prepare("SELECT id,path,size,modified FROM media WHERE info_size IS NOT size OR info_modified IS NOT modified")
+                .readable()?;
+            let rows = q
+                .query_map([], |r| {
+                    Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?), r.get(2)?, r.get(3)?))
+                })
+                .readable()?;
+            rows.collect::<std::result::Result<_, _>>().readable()?
+        };
+        const BATCH: usize = 32;
+        for (n, batch) in pending.chunks(BATCH).enumerate() {
+            cancelled(cancel)?;
+            progress(format!("Reading video info {} / {}", n * BATCH, pending.len()));
+            let paths: Vec<PathBuf> = batch.iter().map(|(_, path, _, _)| path.clone()).collect();
+            let infos = media_info::read_many(&paths);
+            let tx = self.db.transaction().readable()?;
+            for ((id, _, size, modified), info) in batch.iter().zip(infos) {
+                tx.execute(
+                    "UPDATE media SET duration_ms=?1,width=?2,height=?3,info_size=?4,info_modified=?5 WHERE id=?6",
+                    params![info.duration_ms, info.width, info.height, size, modified, id],
+                )
+                .readable()?;
+            }
+            tx.commit().readable()?;
+        }
+        Ok(())
+    }
+    /// Schema 2: play statistics per video, and new built-in columns start hidden.
+    fn migrate_to_2(&mut self) -> Result<()> {
+        let tx = self.db.transaction().readable()?;
+        tx.execute_batch(
+            "ALTER TABLE media ADD COLUMN plays INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE media ADD COLUMN last_played INTEGER;",
+        )
+        .readable()?;
+        let raw: Option<String> = tx
+            .query_row("SELECT value FROM settings WHERE key='hidden_columns'", [], |r| r.get(0))
+            .optional()
+            .readable()?;
+        let mut hidden: Vec<String> = raw
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        for key in DEFAULT_HIDDEN_COLUMNS {
+            if !hidden.iter().any(|h| h == key) {
+                hidden.push(key.to_string());
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('hidden_columns',?1)",
+            [serde_json::to_string(&hidden).readable()?],
+        )
+        .readable()?;
+        tx.execute_batch("PRAGMA user_version=2;").readable()?;
+        tx.commit().readable()
     }
     pub fn sources(&self) -> Result<Vec<Source>> {
         let mut q = self
@@ -297,7 +386,7 @@ impl Workspace {
         }
         let mut q = self
             .db
-            .prepare("SELECT id,path,size,metadata FROM media ORDER BY path COLLATE NOCASE")
+            .prepare("SELECT id,path,size,metadata,plays,last_played,duration_ms,width,height FROM media ORDER BY path COLLATE NOCASE")
             .readable()?;
         let rows = q
             .query_map([], |r| {
@@ -306,18 +395,26 @@ impl Workspace {
                     r.get::<_, String>(1)?,
                     r.get::<_, u64>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    [r.get::<_, Option<i64>>(6)?, r.get(7)?, r.get(8)?],
                 ))
             })
             .readable()?;
         let mut result = Vec::new();
         for row in rows {
-            let (id, path, size, data) = row.readable()?;
+            let (id, path, size, data, plays, last_played, [duration_ms, width, height]) = row.readable()?;
             result.push(Video {
                 id,
                 path,
                 size,
                 values: serde_json::from_str(&data).readable()?,
                 images: images.remove(&id).unwrap_or_default(),
+                plays,
+                last_played,
+                duration_ms,
+                width,
+                height,
             });
         }
         Ok(result)
@@ -452,6 +549,7 @@ impl Workspace {
             }
         }
         tx.commit().readable()?;
+        self.read_media_info(cancel, progress)?;
         Ok(errors)
     }
     pub fn add_field(&self, name: &str, kind: &str) -> Result<()> {
@@ -1031,7 +1129,7 @@ impl Workspace {
         self.preview = Some(plan.clone());
         Ok(plan)
     }
-    pub fn play(&self, ids: &[i64], playlist: bool) -> Result<()> {
+    pub fn play(&mut self, ids: &[i64], playlist: bool) -> Result<()> {
         let videos = self.videos()?;
         let paths: Vec<_> = ids
             .iter()
@@ -1078,7 +1176,35 @@ impl Workspace {
         } else {
             paths[0].clone()
         };
-        launch(&target, self.setting("player")?.as_str().unwrap_or(""))
+        launch(&target, self.setting("player")?.as_str().unwrap_or(""))?;
+        // The app only knows a playback was started, not how much was watched.
+        self.record_plays(ids)
+    }
+    pub fn record_plays(&mut self, ids: &[i64]) -> Result<()> {
+        let played = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let tx = self.db.transaction().readable()?;
+        for id in ids.iter().collect::<HashSet<_>>() {
+            tx.execute(
+                "UPDATE media SET plays=plays+1,last_played=?1 WHERE id=?2",
+                params![played, id],
+            )
+            .readable()?;
+        }
+        tx.commit().readable()
+    }
+    pub fn reset_plays(&mut self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Err("Select at least one video.".into());
+        }
+        let tx = self.db.transaction().readable()?;
+        for id in ids {
+            tx.execute("UPDATE media SET plays=0,last_played=NULL WHERE id=?1", [id])
+                .readable()?;
+        }
+        tx.commit().readable()
     }
 }
 

@@ -424,8 +424,69 @@ fn column_widths_are_validated_and_returned() {
 #[test]
 fn hidden_columns_are_a_list_of_names() {
     let (_temp, ws, _source) = fixture();
-    assert!(ws.snapshot().unwrap().hidden_columns.is_empty());
+    assert_eq!(ws.snapshot().unwrap().hidden_columns, vec!["last_played", "format", "folder"]);
     assert!(ws.set_setting("hidden_columns", json!({"size": true})).is_err());
     ws.set_setting("hidden_columns", json!(["size", "3"])).unwrap();
     assert_eq!(ws.snapshot().unwrap().hidden_columns, vec!["size", "3"]);
+}
+
+#[test]
+fn plays_are_recorded_and_reset() {
+    let (_temp, mut ws, source) = fixture();
+    write(&source.join("a.mp4"));
+    write(&source.join("b.mp4"));
+    scan(&mut ws, &source);
+    let ids: Vec<i64> = ws.videos().unwrap().iter().map(|v| v.id).collect();
+    assert!(ws.videos().unwrap().iter().all(|v| v.plays == 0 && v.last_played.is_none()));
+    ws.record_plays(&[ids[0], ids[0], ids[1]]).unwrap();
+    ws.record_plays(&ids[..1]).unwrap();
+    let videos = ws.videos().unwrap();
+    let get = |id: i64| videos.iter().find(|v| v.id == id).unwrap().clone();
+    assert_eq!((get(ids[0]).plays, get(ids[1]).plays), (2, 1));
+    assert!(get(ids[0]).last_played.is_some());
+    ws.reset_plays(&ids[..1]).unwrap();
+    let reset = ws.videos().unwrap().into_iter().find(|v| v.id == ids[0]).unwrap();
+    assert_eq!((reset.plays, reset.last_played), (0, None));
+    assert!(ws.reset_plays(&[]).is_err());
+    assert!(ws.snapshot().unwrap().hidden_columns.contains(&"folder".to_string()));
+}
+
+#[test]
+fn schema_1_workspace_migrates_and_keeps_hidden_columns() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("old");
+    fs::create_dir_all(root.join(".video-workspace")).unwrap();
+    {
+        let db = Connection::open(root.join(".video-workspace").join("catalog.sqlite3")).unwrap();
+        db.execute_batch("CREATE TABLE media(id INTEGER PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,modified INTEGER NOT NULL,metadata TEXT NOT NULL DEFAULT '{}');
+            CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO media(path,size,modified) VALUES ('C:\\v\\old.mp4',5,1);
+            INSERT INTO settings VALUES ('hidden_columns','[\"size\"]');
+            PRAGMA user_version=1;").unwrap();
+    }
+    let ws = Workspace::open(&root).unwrap();
+    let video = &ws.videos().unwrap()[0];
+    assert_eq!((video.plays, video.last_played, video.duration_ms), (0, None, None));
+    assert_eq!(ws.snapshot().unwrap().hidden_columns, vec!["size", "last_played", "format", "folder"]);
+    drop(ws);
+    let ws = Workspace::open(&root).unwrap();
+    assert_eq!(ws.snapshot().unwrap().hidden_columns.len(), 4);
+}
+
+#[test]
+fn scan_caches_media_info_until_the_file_changes() {
+    let (_temp, mut ws, source) = fixture();
+    write(&source.join("a.mp4"));
+    scan(&mut ws, &source);
+    let pending = |ws: &Workspace| -> i64 {
+        ws.db
+            .query_row("SELECT count(*) FROM media WHERE info_size IS NOT size OR info_modified IS NOT modified", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(pending(&ws), 0);
+    assert_eq!(ws.videos().unwrap()[0].duration_ms, None);
+    ws.db.execute("UPDATE media SET size=size+1", []).unwrap();
+    assert_eq!(pending(&ws), 1);
+    ws.scan(&AtomicBool::new(false), &|_| {}).unwrap();
+    assert_eq!(pending(&ws), 0);
 }

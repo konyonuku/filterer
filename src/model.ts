@@ -3,7 +3,62 @@ export type Field = { id: number; name: string; kind: 'text' | 'number' | 'date'
 export const ratingSteps = Array.from({ length: 11 }, (_, i) => i / 2);
 export const ratingText = (value: unknown) => typeof value === 'number' ? `${value} / 5` : 'Not rated';
 export type ImageRef = { id: number; path: string; cover: boolean };
-export type Video = { id: number; path: string; size: number; values: Record<string, unknown>; images: ImageRef[] };
+export type Video = { id: number; path: string; size: number; values: Record<string, unknown>; images: ImageRef[]; plays: number; last_played: number | null;
+  duration_ms?: number | null; width?: number | null; height?: number | null };
+/** Built-in columns the app fills itself, keyed like field ids but never numeric. */
+export const builtinLabels: Record<string, string> = { name: 'File name', duration: 'Duration', resolution: 'Resolution', size: 'Size', plays: 'Plays', last_played: 'Last played', format: 'Format', folder: 'Folder' };
+/** Default order after File name and the user fields. */
+export const builtinColumnKeys = ['duration', 'resolution', 'size', 'plays', 'last_played', 'format', 'folder'];
+/** Built-in columns that also get a filter, with the filter control they use. */
+export const builtinFilters: { id: string; name: string; kind: 'number' | 'text' | 'date' }[] = [
+  { id: 'duration', name: 'Duration (min)', kind: 'number' }, { id: 'resolution', name: 'Resolution', kind: 'text' },
+  { id: 'plays', name: 'Plays', kind: 'number' }, { id: 'format', name: 'Format', kind: 'text' }, { id: 'last_played', name: 'Last played', kind: 'date' },
+];
+/** `1:58:20` or `4:05`; empty when unknown. */
+export function durationText(ms: number | null | undefined): string {
+  if (!ms) return '';
+  const total = Math.round(ms / 1000), h = Math.floor(total / 3600), m = Math.floor(total / 60) % 60, s = total % 60;
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+export const resolutionText = (video: Video) => video.width && video.height ? `${video.width}×${video.height}` : '';
+/** Quality class by the longer side, so portrait and wide-screen videos land in the expected class. */
+export const qualityClasses = ['4K', '1440p', '1080p', '720p', 'SD'];
+export function qualityOf(video: Video): string | null {
+  if (!video.width || !video.height) return null;
+  const long = Math.max(video.width, video.height);
+  return long >= 3840 ? '4K' : long >= 2560 ? '1440p' : long >= 1920 ? '1080p' : long >= 1280 ? '720p' : 'SD';
+}
+export const folderOf = (path: string) => path.replace(/[\\/][^\\/]*$/, '');
+export const formatOf = (path: string) => (/\.([^.\\/]+)$/.exec(path)?.[1] || '').toUpperCase();
+const pad = (n: number) => String(n).padStart(2, '0');
+/** Local `YYYY-MM-DD HH:mm` (or just the date) for Unix seconds. */
+export function localTime(seconds: number | null | undefined, dateOnly = false): string {
+  if (seconds == null) return '';
+  const d = new Date(seconds * 1000);
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return dateOnly ? date : `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+/** Value used for sorting a column: built-ins come from the file and play records, fields from the stored values. */
+export function columnValue(video: Video, key: string): unknown {
+  switch (key) {
+    case 'name': return filename(video.path);
+    case 'duration': return video.duration_ms || null;
+    case 'resolution': return video.width && video.height ? video.width * video.height : null;
+    case 'size': return video.size;
+    case 'plays': return video.plays;
+    case 'last_played': return video.last_played;
+    case 'format': return formatOf(video.path);
+    case 'folder': return folderOf(video.path);
+    default: return video.values[key];
+  }
+}
+/** Value used by filters; dates compare as local `YYYY-MM-DD`. */
+export function filterValue(video: Video, key: string): unknown {
+  if (key === 'last_played') return localTime(video.last_played, true) || null;
+  if (key === 'duration') return video.duration_ms ? video.duration_ms / 60000 : null;
+  if (key === 'resolution') return qualityOf(video);
+  return columnValue(video, key);
+}
 export type Rule = { field: string; op: 'eq' | 'contains' | 'gte' | 'lte' | 'empty' | 'tags'; value?: unknown };
 /** Tag filter: every `all` tag, at least one `any` tag (when given), and no `none` tag. */
 export type TagSet = { all: string[]; any: string[]; none: string[] };
@@ -82,7 +137,7 @@ export function matches(video: Video, query: Query): boolean {
   if (search && !`${video.path} ${Object.values(video.values).map(text).join(' ')}`.toLocaleLowerCase().includes(search)) return false;
   const rules = query.rules || [];
   const results = rules.map(rule => {
-    const value = video.values[String(rule.field)];
+    const value = filterValue(video, String(rule.field));
     if (rule.op === 'tags') {
       const set = tagSet(rule), tags = Array.isArray(value) ? value.map(text) : [];
       return set.all.every(t => tags.includes(t)) && (!set.any.length || set.any.some(t => tags.includes(t))) && !set.none.some(t => tags.includes(t));
@@ -101,8 +156,7 @@ export function matches(video: Video, query: Query): boolean {
 }
 export function sortedVideos(videos: Video[], query: Query, key: string, reverse: boolean): Video[] {
   return videos.filter(v => matches(v, query)).sort((a, b) => {
-    const av = key === 'name' ? filename(a.path) : key === 'size' ? a.size : a.values[key];
-    const bv = key === 'name' ? filename(b.path) : key === 'size' ? b.size : b.values[key];
+    const av = columnValue(a, key), bv = columnValue(b, key);
     if (av == null) return bv == null ? 0 : 1;
     if (bv == null) return -1;
     const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : text(av).localeCompare(text(bv), 'ko', { numeric: true });

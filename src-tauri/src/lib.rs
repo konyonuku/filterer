@@ -1,4 +1,5 @@
 mod catalog;
+mod media_info;
 mod preferences;
 
 use catalog::{Result, Workspace};
@@ -115,6 +116,9 @@ enum Request {
     Play {
         ids: Vec<i64>,
         playlist: bool,
+    },
+    ResetPlays {
+        ids: Vec<i64>,
     },
 }
 
@@ -247,10 +251,8 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
             return Ok(json!({"snapshot": ws.snapshot()?, "remaining": remaining}));
         }
         Request::Resume { id } => return serialized(ws.resume_plan(&id)?),
-        Request::Play { ids, playlist } => {
-            ws.play(&ids, playlist)?;
-            return Ok(Value::Null);
-        }
+        Request::Play { ids, playlist } => ws.play(&ids, playlist)?,
+        Request::ResetPlays { ids } => ws.reset_plays(&ids)?,
         Request::Startup | Request::Open { .. } | Request::Preferences => unreachable!(),
     }
     serialized(ws.snapshot()?)

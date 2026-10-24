@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { filename, matches, moveKey, moveKeys, ordered, ratingSteps, ratingText, sortedVideos, tagCounts, tagSet, text, toggleTag, type Query, type Rule, type Video } from './model';
+import { columnValue, durationText, filename, qualityOf, resolutionText, folderOf, formatOf, localTime, matches, moveKey, moveKeys, ordered, ratingSteps, ratingText, sortedVideos, tagCounts, tagSet, text, toggleTag, type Query, type Rule, type Video } from './model';
 
 const videos: Video[] = [
-  { id: 1, path: 'C:\\Sources\\Dragön & 01.mp4', size: 50, values: { '1': ['Dragön', 'Adventure'], '2': 90, '3': '2025-03-01' }, images: [] },
-  { id: 2, path: '/videos/Wörk 10.mp4', size: 10, values: { '1': ['Nature'], '2': 80, '3': '2024-10-01' }, images: [] },
-  { id: 3, path: '/videos/Wörk 2.mp4', size: 20, values: { '1': null, '2': null }, images: [] },
+  { id: 1, path: 'C:\\Sources\\Dragön & 01.mp4', size: 50, values: { '1': ['Dragön', 'Adventure'], '2': 90, '3': '2025-03-01' }, images: [], plays: 0, last_played: null },
+  { id: 2, path: '/videos/Wörk 10.mp4', size: 10, values: { '1': ['Nature'], '2': 80, '3': '2024-10-01' }, images: [], plays: 0, last_played: null },
+  { id: 3, path: '/videos/Wörk 2.mp4', size: 20, values: { '1': null, '2': null }, images: [], plays: 0, last_played: null },
 ];
 describe('saved filter compatibility and list ordering', () => {
   it('matches multiple tags exactly and searches metadata', () => {
@@ -44,9 +44,9 @@ describe('column and filter ordering', () => {
 });
 describe('star ratings', () => {
   const rated: Video[] = [
-    { id: 1, path: 'a.mp4', size: 1, values: { r: 4.5 }, images: [] },
-    { id: 2, path: 'b.mp4', size: 1, values: { r: 0 }, images: [] },
-    { id: 3, path: 'c.mp4', size: 1, values: {}, images: [] },
+    { id: 1, path: 'a.mp4', size: 1, values: { r: 4.5 }, images: [], plays: 0, last_played: null },
+    { id: 2, path: 'b.mp4', size: 1, values: { r: 0 }, images: [], plays: 0, last_played: null },
+    { id: 3, path: 'c.mp4', size: 1, values: {}, images: [], plays: 0, last_played: null },
   ];
   const ids = (rules: Query['rules']) => sortedVideos(rated, { rules }, 'name', false).map(v => v.id);
   it('keeps unrated apart from zero stars in filters', () => {
@@ -64,10 +64,10 @@ describe('star ratings', () => {
 });
 describe('tag filters', () => {
   const tagged: Video[] = [
-    { id: 1, path: 'a.mp4', size: 1, values: { t: ['Drama', 'Action'] }, images: [] },
-    { id: 2, path: 'b.mp4', size: 1, values: { t: ['Drama', 'Comedy', 'Horror'] }, images: [] },
-    { id: 3, path: 'c.mp4', size: 1, values: { t: ['Comedy'] }, images: [] },
-    { id: 4, path: 'd.mp4', size: 1, values: {}, images: [] },
+    { id: 1, path: 'a.mp4', size: 1, values: { t: ['Drama', 'Action'] }, images: [], plays: 0, last_played: null },
+    { id: 2, path: 'b.mp4', size: 1, values: { t: ['Drama', 'Comedy', 'Horror'] }, images: [], plays: 0, last_played: null },
+    { id: 3, path: 'c.mp4', size: 1, values: { t: ['Comedy'] }, images: [], plays: 0, last_played: null },
+    { id: 4, path: 'd.mp4', size: 1, values: {}, images: [], plays: 0, last_played: null },
   ];
   const ids = (value: object) => sortedVideos(tagged, { rules: [{ field: 't', op: 'tags', value }] }, 'name', false).map(v => v.id);
   it('combines required, any-of and excluded tags', () => {
@@ -101,5 +101,52 @@ describe('moving a group of columns', () => {
     expect(moveKeys(keys, ['4'], '4', '6')).toEqual(moveKey(keys, '4', '6'));
     expect(moveKeys(keys, ['6'], '6', '2')).toEqual(moveKey(keys, '6', '2'));
     expect(moveKeys(keys, ['2', '6'], '2', '6')).toEqual(keys);
+  });
+});
+describe('built-in columns', () => {
+  const played: Video[] = [
+    { id: 1, path: 'C:\\Lib\\A\\one.mkv', size: 1, values: {}, images: [], plays: 3, last_played: new Date(2026, 9, 20, 9, 5).getTime() / 1000 },
+    { id: 2, path: '/lib/b/two.mp4', size: 1, values: {}, images: [], plays: 0, last_played: null },
+    { id: 3, path: 'C:\\Lib\\A\\three.MP4', size: 1, values: {}, images: [], plays: 1, last_played: new Date(2026, 9, 24, 23, 0).getTime() / 1000 },
+  ];
+  const ids = (q: Query, key = 'name') => sortedVideos(played, q, key, false).map(v => v.id);
+  it('derives folder, format and local times', () => {
+    expect(folderOf(played[0].path)).toBe('C:\\Lib\\A');
+    expect(folderOf(played[1].path)).toBe('/lib/b');
+    expect([formatOf(played[0].path), formatOf(played[2].path)]).toEqual(['MKV', 'MP4']);
+    expect(localTime(played[0].last_played)).toBe('2026-10-20 09:05');
+    expect(localTime(null)).toBe('');
+    expect(columnValue(played[1], 'plays')).toBe(0);
+  });
+  it('filters and sorts by plays, format and last played', () => {
+    expect(ids({ rules: [{ field: 'plays', op: 'gte', value: 1 }] })).toEqual([1, 3]);
+    expect(ids({ rules: [{ field: 'plays', op: 'eq', value: 0 }] })).toEqual([2]);
+    expect(ids({ rules: [{ field: 'format', op: 'eq', value: 'MP4' }] })).toEqual([3, 2]);
+    expect(ids({ rules: [{ field: 'last_played', op: 'gte', value: '2026-10-24' }] })).toEqual([3]);
+    expect(ids({ rules: [{ field: 'last_played', op: 'empty' }] })).toEqual([2]);
+    expect(ids({}, 'last_played')).toEqual([1, 3, 2]);
+    expect(sortedVideos(played, {}, 'plays', true).map(v => v.id)).toEqual([1, 3, 2]);
+  });
+});
+describe('duration and resolution', () => {
+  const base = { size: 1, values: {}, images: [], plays: 0, last_played: null };
+  const media: Video[] = [
+    { ...base, id: 1, path: 'a.mp4', duration_ms: 7100000, width: 1920, height: 1080 },
+    { ...base, id: 2, path: 'b.mp4', duration_ms: 245000, width: 1080, height: 1920 },
+    { ...base, id: 3, path: 'c.mp4', duration_ms: null, width: null, height: null },
+    { ...base, id: 4, path: 'd.mp4', duration_ms: 1800000, width: 3840, height: 1600 },
+  ];
+  it('formats and classifies', () => {
+    expect([durationText(7100000), durationText(245000), durationText(null)]).toEqual(['1:58:20', '4:05', '']);
+    expect([resolutionText(media[0]), resolutionText(media[2])]).toEqual(['1920×1080', '']);
+    expect(media.map(qualityOf)).toEqual(['1080p', '1080p', null, '4K']);
+  });
+  it('filters by minutes and quality, sorts with unknown last', () => {
+    const ids = (q: Query, key = 'name', reverse = false) => sortedVideos(media, q, key, reverse).map(v => v.id);
+    expect(ids({ rules: [{ field: 'duration', op: 'gte', value: 30 }] })).toEqual([1, 4]);
+    expect(ids({ rules: [{ field: 'duration', op: 'empty' }] })).toEqual([3]);
+    expect(ids({ rules: [{ field: 'resolution', op: 'eq', value: '1080p' }] })).toEqual([1, 2]);
+    expect(ids({}, 'duration')).toEqual([2, 4, 1, 3]);
+    expect(ids({}, 'resolution', true)).toEqual([4, 1, 2, 3]);
   });
 });
