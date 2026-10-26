@@ -7,6 +7,9 @@ export const cancel = () => invoke('cancel_operation');
 export async function confirmAction(message: string): Promise<boolean> {
   return desktop ? await confirm(message, { title: 'Filterer', kind: 'warning' }) : window.confirm(message);
 }
+export async function chooseFfprobe(): Promise<string | null> {
+  return await open({ multiple: false, title: 'Select ffprobe.exe', filters: [{ name: 'ffprobe', extensions: ['exe'] }] }) as string | null;
+}
 export async function chooseFolder(): Promise<string | null> {
   return await open({ directory: true, multiple: false, title: 'Select folder' }) as string | null;
 }

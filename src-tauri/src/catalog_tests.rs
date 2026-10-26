@@ -480,7 +480,7 @@ fn scan_caches_media_info_until_the_file_changes() {
     scan(&mut ws, &source);
     let pending = |ws: &Workspace| -> i64 {
         ws.db
-            .query_row("SELECT count(*) FROM media WHERE info_size IS NOT size OR info_modified IS NOT modified", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM media WHERE info_size IS NOT size OR info_modified IS NOT modified OR info_reader IS NOT 'windows'", [], |r| r.get(0))
             .unwrap()
     };
     assert_eq!(pending(&ws), 0);
@@ -489,4 +489,9 @@ fn scan_caches_media_info_until_the_file_changes() {
     assert_eq!(pending(&ws), 1);
     ws.scan(&AtomicBool::new(false), &|_| {}).unwrap();
     assert_eq!(pending(&ws), 0);
+    // Switching to ffprobe re-reads every video once, even unchanged ones.
+    ws.ffprobe = Some(PathBuf::from("missing-ffprobe.exe"));
+    ws.scan(&AtomicBool::new(false), &|_| {}).unwrap();
+    let ffprobe_rows: i64 = ws.db.query_row("SELECT count(*) FROM media WHERE info_reader='ffprobe'", [], |r| r.get(0)).unwrap();
+    assert_eq!(ffprobe_rows, 1);
 }

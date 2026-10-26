@@ -79,6 +79,15 @@ export function toggleTag(set: TagSet, tag: string, state: TagState): TagSet {
   if (current !== state) next[state] = [...next[state], tag];
   return next;
 }
+/**
+ * Puts the tags a filter matched first: AND tags, then OR tags, each in the order they were picked
+ * in the filter, then the remaining tags in their stored order. `matched` marks the filter hits.
+ */
+export function filterFirstTags(tags: string[], rule?: Rule): { tags: string[]; matched: Set<string> } {
+  const set = tagSet(rule);
+  const first = [...set.all, ...set.any].filter((tag, i, all) => tags.includes(tag) && all.indexOf(tag) === i);
+  return { tags: [...first, ...tags.filter(tag => !first.includes(tag))], matched: new Set(first) };
+}
 export const tagSetEmpty = (set: TagSet) => !set.all.length && !set.any.length && !set.none.length;
 /** Tags of one field with the number of videos carrying each, most used first. */
 export function tagCounts(videos: Video[], field: string): [string, number][] {
@@ -98,6 +107,8 @@ export type Snapshot = {
   sources: { path: string; recursive: boolean }[]; history: History[]; player: string; playlist_format: string;
   column_order: string[]; filter_order: string[]; column_widths: Record<string, number>; hidden_columns: string[]; options: Options;
 };
+/** ffprobe status on this computer; without it media info comes from Windows media properties. */
+export type MediaTools = { ffprobe: string | null; version: string | null; winget: boolean; package: string; dismissed: boolean };
 export type Options = { unclassified_folder: string; shared_folder: string; page_size: number; visible_fields: number };
 export const pageSizes = [25, 50, 100, 200, 500];
 /** Applies a saved order to the current keys: unknown saved keys are dropped, new keys keep their default position at the end. */

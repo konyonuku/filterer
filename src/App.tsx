@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, Eye, EyeOff, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
-import { cancel, chooseFile, chooseFolder, confirmAction, desktop, request } from './bridge';
-import { builtinColumnKeys, builtinFilters, builtinLabels, durationText, qualityClasses, qualityOf, resolutionText, filename, filterValue, folderOf, formatOf, localTime, moveKey, moveKeys, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, CheckSquare, ChevronDown, Eye, EyeOff, ChevronLeft, ChevronRight, CircleHelp, FileVideo, Filter, Folder, FolderOpen, FolderPlus, GripVertical, Info, Grid2X2, Image as ImageIcon, List, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, SlidersHorizontal, Tag, Trash2, X } from 'lucide-react';
+import { cancel, chooseFfprobe, chooseFile, chooseFolder, confirmAction, desktop, request } from './bridge';
+import { builtinColumnKeys, builtinFilters, builtinLabels, filterFirstTags, durationText, qualityClasses, qualityOf, resolutionText, filename, filterValue, folderOf, formatOf, localTime, moveKey, moveKeys, ordered, pageSizes, ratingSteps, ratingText, size, tagCounts, tagSet, tagSetEmpty, toggleTag, type TagState, sortedVideos, text, type Field, type ImageRef, type MediaTools, type Options, type Plan, type Query, type Rule, type Snapshot, type Video } from './model';
 
 type Panel = null | 'sources' | 'field' | 'edit' | 'move' | 'options' | 'history' | 'save' | 'detail';
 const ratingFitWidth = 110;
@@ -216,6 +216,7 @@ export default function App() {
   const [draft, setDraft] = useState<Options>({ unclassified_folder: '', shared_folder: '', page_size: 100, visible_fields: 6 });
   const [resetOrder, setResetOrder] = useState({ column: false, filter: false, widths: false });
   const [reopenLast, setReopenLast] = useState(true);
+  const [tools, setTools] = useState<MediaTools | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [detailImage, setDetailImage] = useState(0);
   const [comparisons, setComparisons] = useState<Record<string, Rule['op']>>({});
@@ -301,6 +302,10 @@ export default function App() {
     return () => { document.removeEventListener('pointerdown', down, true); document.removeEventListener('keydown', key); };
   }, []);
 
+  useEffect(() => {
+    if (!desktop || !data?.root) return;
+    request<MediaTools>({ action: 'media_tools' }).then(setTools).catch(() => { /* the notice simply stays hidden */ });
+  }, [data?.root]);
   const rows = useMemo(() => sortedVideos(data?.videos || [], query, sort.key, sort.reverse), [data, query, sort]);
   const pageSize = data?.options.page_size || 100;
   const visibleFields = data?.options.visible_fields || 6;
@@ -495,6 +500,22 @@ export default function App() {
       await run<Snapshot>({ action: 'open', path }, s => { load(s); changeQuery({ rules: [], mode: 'AND', search: '' }); }, 'Workspace opened.');
     } catch (e) { setError(String(e)); }
   }
+  /** After ffprobe becomes available, rescan so existing videos are read again with it. */
+  async function applyFfprobe(payload: Record<string, unknown>, message: string) {
+    let next: MediaTools | null = null;
+    await run<MediaTools>(payload, t => { next = t; setTools(t); }, message);
+    const found = (next as MediaTools | null)?.ffprobe;
+    if (found && found !== tools?.ffprobe && data?.sources.length) await run({ action: 'scan' }, scanResult, 'Video info read again with ffprobe.');
+  }
+  async function installFfprobe() {
+    if (!tools) return;
+    if (!await confirmAction(`Install FFmpeg (${tools.package}, includes ffprobe) with winget? It downloads from the internet and installs for your Windows user only.`)) return;
+    await applyFfprobe({ action: 'install_ffprobe' }, 'ffprobe installed.');
+  }
+  async function locateFfprobe() {
+    try { const path = await chooseFfprobe(); if (path) await applyFfprobe({ action: 'set_ffprobe', path }, 'ffprobe set.'); }
+    catch (e) { setError(String(e)); }
+  }
   function scanResult(result: { snapshot: Snapshot; warnings: string[] }) { load(result.snapshot); if (result.warnings.length) setError(result.warnings.join('\n')); }
   async function addSource() {
     try { const path = await chooseFolder(); if (path) await run({ action: 'add_source', path, recursive }, scanResult, 'Folder registered and videos loaded.'); }
@@ -566,6 +587,11 @@ export default function App() {
       <div className="welcome-steps"><div><span>01</span><strong>Load folders</strong><small>Many source folders in one workspace</small></div><div><span>02</span><strong>Classify and find</strong><small>Filter fast by tags, scores, and dates</small></div><div><span>03</span><strong>Select and organize</strong><small>Preview, then move with related files</small></div></div>
       {!desktop && <p className="browser-hint">Desktop features are available in the Tauri app.</p>}
     </main> : <main className="explorer">
+      {tools && !tools.ffprobe && !tools.dismissed && <div className="tool-notice" role="status"><Info size={15} /><span>Some video formats need <strong>ffprobe</strong> to show duration and resolution. Until then, Filterer reads them with Windows media properties.</span>
+        {tools.winget && <button className="primary" disabled={busy} onClick={() => void installFfprobe()}>Install ffprobe</button>}
+        <button disabled={busy} onClick={() => void locateFfprobe()}>Locate ffprobe.exe…</button>
+        <button className="text-button muted" disabled={busy} onClick={() => void request<MediaTools>({ action: 'dismiss_ffprobe_notice' }).then(setTools).catch(e => setError(String(e)))}>Not now</button>
+      </div>}
       <section className="workspace-bar">
         <div className="workspace-title"><span className="workspace-icon"><Folder size={21} /></span><div><h1>{filename(data.root)}</h1><p title={data.root}>{data.root}</p></div></div>
         <div className="workspace-actions"><span className="source-count">{data.sources.length} source {data.sources.length === 1 ? 'folder' : 'folders'}</span><button disabled={busy} onClick={() => openPanel('sources')}><FolderPlus size={15} />Add folder</button>
@@ -643,8 +669,9 @@ export default function App() {
                 const add = () => { const extra = tagText.split(',').map(t => t.trim()).filter((t, i, all) => t && !tags.includes(t) && all.indexOf(t) === i); setTagText(''); if (extra.length) save([...tags, ...extra]); };
                 const closeDraft = () => { tagDraftRef.current = null; setTagDraft(null); setTagText(''); };
                 const adding = tagDraft?.id === video.id && tagDraft.field === key;
+                const filterHits = filterFirstTags(tags, activeRules.find(r => String(r.field) === key)).matched;
                 return <td key={key} className="tag-cell-editable" title={tags.join(', ')} {...hold}><span className="tag-list tag-list-edit">
-                  {tags.map(t => <span className="tag-chip tag-chip-edit" key={t}><span>{t}</span><button type="button" className="tag-remove" aria-label={`Remove tag ${t}`} title="Remove tag" onClick={() => save(tags.filter(x => x !== t))}><X size={10} /></button></span>)}
+                  {tags.map(t => <span className={`tag-chip tag-chip-edit${filterHits.has(t) ? ' tag-matched' : ''}`} key={t}><span>{t}</span><button type="button" className="tag-remove" aria-label={`Remove tag ${t}`} title="Remove tag" onClick={() => save(tags.filter(x => x !== t))}><X size={10} /></button></span>)}
                   {adding ? <input autoFocus className="tag-input" aria-label={`New ${name} tag`} placeholder="New tag" value={tagText} onChange={e => setTagText(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } else if (e.key === 'Escape') { e.preventDefault(); closeDraft(); } }}
                     onBlur={() => { if (!tagDraftRef.current) return; add(); closeDraft(); }} />
@@ -653,7 +680,11 @@ export default function App() {
               }
               if (editing?.id === video.id && editing.field === key) return <td key={key} className="editing-cell" {...hold}><input autoFocus className="cell-input" aria-label={`Edit ${fieldsById.get(key)?.name}`} type={kind === 'number' ? 'number' : kind === 'date' ? 'date' : 'text'} placeholder={kind === 'tags' ? 'Tag A, Tag B' : ''} value={cellValue} onFocus={e => e.target.select()} onChange={e => setCellValue(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitCell(); } else if (e.key === 'Escape') { e.preventDefault(); editingRef.current = null; setEditing(null); } }} onBlur={commitCell} /></td>;
-              return <td key={key} className={`${kind === 'number' ? 'numeric score-cell' : ''}${open ? ' editable-cell' : ''}`} title={text(value) || (open ? 'Click to edit' : undefined)} {...hold} onClick={open ? e => { if (e.shiftKey) return; e.stopPropagation(); startEdit(video.id, key, value); } : undefined}>{Array.isArray(value) ? <span className="tag-list">{value.slice(0, 2).map((v, n) => <span className="tag-chip" key={n}>{text(v)}</span>)}{value.length > 2 && <small>+{value.length - 2}</small>}</span> : text(value) || <span className="empty-value">—</span>}</td>;
+              return <td key={key} className={`${kind === 'number' ? 'numeric score-cell' : ''}${open ? ' editable-cell' : ''}`} title={text(value) || (open ? 'Click to edit' : undefined)} {...hold} onClick={open ? e => { if (e.shiftKey) return; e.stopPropagation(); startEdit(video.id, key, value); } : undefined}>{Array.isArray(value) ? (() => {
+                // Tags the active filter matched come first so the visible chips explain the match.
+                const { tags, matched } = filterFirstTags(value.map(text), activeRules.find(r => String(r.field) === key));
+                return <span className="tag-list">{tags.slice(0, 2).map(t => <span className={`tag-chip${matched.has(t) ? ' tag-matched' : ''}`} key={t}>{t}</span>)}{tags.length > 2 && <small>+{tags.length - 2}</small>}</span>;
+              })() : text(value) || <span className="empty-value">—</span>}</td>;
             })}<td><button className="icon-button row-detail" aria-label={`Details for ${filename(video.path)}`} onDoubleClick={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setDetailId(video.id); setDetailImage(0); setPanel('detail'); }}><MoreHorizontal size={17} /></button></td>
           </tr>)}</tbody></table></div>
           : <div className="gallery">{pageRows.map(video => <div className={`gallery-card ${selected.has(video.id) ? 'card-selected' : ''}`} key={video.id}>
@@ -713,6 +744,10 @@ export default function App() {
         {([['column', 'Column order', columnOrder.map(columnLabel)], ['filter', 'Filter order', filterOrder.map(columnLabel)]] as const).map(([kind, label, names]) => <div className="order-row" key={kind}><div><strong>{label}</strong><span title={names.join(' · ')}>{resetOrder[kind] ? 'Resets to the default order when saved' : names.join(' · ') || 'No fields yet'}</span></div><button disabled={busy || resetOrder[kind] || !data[`${kind}_order`].length} onClick={() => setResetOrder({ ...resetOrder, [kind]: true })}><RefreshCw size={13} />Reset to default</button></div>)}
         <div className="order-row"><div><strong>Column widths</strong><span>{resetOrder.widths ? 'Resets to the default widths when saved' : Object.keys(data.column_widths).length ? 'Custom widths' : 'Default widths'}</span></div><button disabled={busy || resetOrder.widths || !Object.keys(data.column_widths).length} onClick={() => setResetOrder({ ...resetOrder, widths: true })}><RefreshCw size={13} />Reset to default</button></div>
         <p className="form-hint">To change the order, drag column headers or filter labels on the main screen. To change a width, drag the edge of a column header.</p></section>
+      <section className="options-section"><h3>Video info</h3>
+        <p className="tool-status">{tools?.ffprobe ? <>Using <strong>ffprobe</strong> <span title={tools.ffprobe}>{tools.ffprobe}</span>{tools.version && <small>{tools.version}</small>}</> : <>Using <strong>Windows media properties</strong>. ffprobe was not found; installing it lets more formats show duration and resolution.</>}</p>
+        <div className="tool-actions">{!tools?.ffprobe && tools?.winget && <button disabled={busy} onClick={() => void installFfprobe()}>Install ffprobe</button>}<button disabled={busy} onClick={() => void locateFfprobe()}>Locate ffprobe.exe…</button><button disabled={busy} onClick={() => void applyFfprobe({ action: 'detect_ffprobe' }, 'ffprobe search finished.')}><RefreshCw size={13} />Detect again</button></div>
+        <p className="form-hint">ffprobe is installed separately (with winget: {tools?.package || 'Gyan.FFmpeg.Essentials'}). When it is set up, videos are read again with it; files it cannot read fall back to Windows media properties.</p></section>
       <section className="options-section"><h3>Player</h3><label className="form-field">Player executable<div className="input-with-button"><input value={player} onChange={e => setPlayer(e.target.value)} placeholder="Leave empty to use the OS default app" /><button disabled={busy} onClick={() => void chooseFile().then(p => { if (p) setPlayer(p); }).catch(e => setError(String(e)))}>Browse</button></div></label><label className="form-field">New playlist format<select value={format} onChange={e => setFormat(e.target.value)}><option value="m3u8">M3U8 · VLC / PotPlayer</option><option value="asx">ASX · Windows Media Player</option></select></label><p className="form-hint">If the default app cannot open the playlist, set the player executable.</p></section>
       <div className="modal-actions"><button onClick={close}>Cancel</button><button className="primary" disabled={busy || !draft.unclassified_folder.trim() || !draft.shared_folder.trim() || !(draft.visible_fields >= 1 && draft.visible_fields <= 50)} onClick={() => void run<Snapshot>({ action: 'options', player, format, options: { ...draft, unclassified_folder: draft.unclassified_folder.trim(), shared_folder: draft.shared_folder.trim(), visible_fields: Math.round(draft.visible_fields) }, ...(resetOrder.column && { column_order: [] }), ...(resetOrder.filter && { filter_order: [] }), ...(resetOrder.widths && { column_widths: {} }), reopen_last: reopenLast }, s => { load(s); setPage(0); setPanel(null); }, 'Options saved.')}>Save</button></div>
     </Modal>}

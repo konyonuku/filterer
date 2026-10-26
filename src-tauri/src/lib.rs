@@ -1,4 +1,5 @@
 mod catalog;
+mod ffprobe;
 mod media_info;
 mod preferences;
 
@@ -37,6 +38,28 @@ impl AppState {
         preferences::save(path, &current)
     }
     /// Failing to record the last workspace must not block opening it.
+    /// A working ffprobe: the saved one, else one detected now (and saved).
+    fn ffprobe(&self) -> Option<PathBuf> {
+        let saved = self.preferences().ffprobe_path;
+        if let Some(path) = saved.filter(|p| p.is_file()) {
+            return Some(path);
+        }
+        let found = ffprobe::detect();
+        if found.is_some() {
+            let _ = self.update_preferences(|p| p.ffprobe_path = found.clone());
+        }
+        found
+    }
+    fn media_tools(&self, ffprobe_path: Option<PathBuf>) -> Value {
+        let version = ffprobe_path.as_deref().and_then(ffprobe::version);
+        json!({
+            "ffprobe": version.as_ref().and(ffprobe_path),
+            "version": version,
+            "winget": ffprobe::winget_available(),
+            "package": ffprobe::WINGET_PACKAGE,
+            "dismissed": self.preferences().ffprobe_notice_dismissed,
+        })
+    }
     fn remember(&self, ws: &Workspace) {
         let _ = self.update_preferences(|p| p.last_workspace = Some(ws.root.clone()));
     }
@@ -48,6 +71,13 @@ enum Request {
     Startup,
     Snapshot,
     Preferences,
+    MediaTools,
+    DetectFfprobe,
+    SetFfprobe {
+        path: PathBuf,
+    },
+    InstallFfprobe,
+    DismissFfprobeNotice,
     Open {
         path: PathBuf,
     },
@@ -147,6 +177,7 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
                 } else if let preferences::Preferences {
                     reopen_last: true,
                     last_workspace: Some(path),
+                    ..
                 } = state.preferences()
                 {
                     if !path.is_dir() {
@@ -178,6 +209,29 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
         Request::Preferences => {
             return Ok(json!({ "reopen_last": state.preferences().reopen_last }));
         }
+        Request::MediaTools => return Ok(state.media_tools(state.ffprobe())),
+        Request::DetectFfprobe => {
+            let found = ffprobe::detect();
+            state.update_preferences(|p| p.ffprobe_path = found.clone())?;
+            return Ok(state.media_tools(found));
+        }
+        Request::SetFfprobe { path } => {
+            if ffprobe::version(path).is_none() {
+                return Err("This file is not ffprobe. Choose ffprobe.exe from an FFmpeg build.".into());
+            }
+            state.update_preferences(|p| p.ffprobe_path = Some(path.clone()))?;
+            return Ok(state.media_tools(Some(path.clone())));
+        }
+        Request::InstallFfprobe => {
+            state.cancel.store(false, Ordering::Relaxed);
+            let found = ffprobe::install(&state.cancel, progress)?;
+            state.update_preferences(|p| p.ffprobe_path = Some(found.clone()))?;
+            return Ok(state.media_tools(Some(found)));
+        }
+        Request::DismissFfprobeNotice => {
+            state.update_preferences(|p| p.ffprobe_notice_dismissed = true)?;
+            return Ok(state.media_tools(state.ffprobe()));
+        }
         _ => {}
     }
     let ws = lock.as_mut().ok_or("Open a workspace first.")?;
@@ -185,12 +239,14 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
         Request::Snapshot => {}
         Request::AddSource { path, recursive } => {
             state.cancel.store(false, Ordering::Relaxed);
+            ws.ffprobe = state.ffprobe();
             ws.add_source(&path, recursive)?;
             let errors = ws.scan(&state.cancel, progress)?;
             return Ok(json!({"snapshot": ws.snapshot()?, "warnings": errors}));
         }
         Request::Scan => {
             state.cancel.store(false, Ordering::Relaxed);
+            ws.ffprobe = state.ffprobe();
             let errors = ws.scan(&state.cancel, progress)?;
             return Ok(json!({"snapshot": ws.snapshot()?, "warnings": errors}));
         }
@@ -253,7 +309,14 @@ fn operate(state: &AppState, request: Request, progress: &dyn Fn(String)) -> Res
         Request::Resume { id } => return serialized(ws.resume_plan(&id)?),
         Request::Play { ids, playlist } => ws.play(&ids, playlist)?,
         Request::ResetPlays { ids } => ws.reset_plays(&ids)?,
-        Request::Startup | Request::Open { .. } | Request::Preferences => unreachable!(),
+        Request::Startup
+        | Request::Open { .. }
+        | Request::Preferences
+        | Request::MediaTools
+        | Request::DetectFfprobe
+        | Request::SetFfprobe { .. }
+        | Request::InstallFfprobe
+        | Request::DismissFfprobeNotice => unreachable!(),
     }
     serialized(ws.snapshot()?)
 }

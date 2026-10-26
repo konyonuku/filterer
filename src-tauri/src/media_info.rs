@@ -1,6 +1,6 @@
-//! Duration and resolution of video files, read from Windows media properties
-//! (the same data Explorer shows). Files Windows cannot parse yield no values.
-use std::path::PathBuf;
+//! Duration and resolution of video files: ffprobe when it is available, otherwise
+//! (or when ffprobe finds nothing) Windows media properties, the same data Explorer shows.
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MediaInfo {
@@ -12,7 +12,7 @@ pub struct MediaInfo {
 const WORKERS: usize = 4;
 
 /// Reads several files in parallel; the result keeps the input order.
-pub fn read_many(paths: &[PathBuf]) -> Vec<MediaInfo> {
+pub fn read_many(paths: &[PathBuf], ffprobe: Option<&Path>) -> Vec<MediaInfo> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(vec![MediaInfo::default(); paths.len()]);
     std::thread::scope(|scope| {
@@ -22,7 +22,10 @@ pub fn read_many(paths: &[PathBuf]) -> Vec<MediaInfo> {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(path) = paths.get(i) else { break };
-                    let info = read(path);
+                    let info = ffprobe
+                        .map(|exe| crate::ffprobe::read(exe, path))
+                        .filter(|info| *info != MediaInfo::default())
+                        .unwrap_or_else(|| read(path));
                     results.lock().unwrap()[i] = info;
                 }
             });
@@ -145,7 +148,7 @@ mod tests {
         let bad = temp.path().join("bytes.mp4");
         std::fs::write(&good, avi(320, 180, 10, 40)).unwrap();
         std::fs::write(&bad, b"synthetic test bytes").unwrap();
-        let infos = read_many(&[good, bad, temp.path().join("missing.mkv")]);
+        let infos = read_many(&[good, bad, temp.path().join("missing.mkv")], None);
         assert_eq!(
             infos[0],
             MediaInfo { duration_ms: Some(4000), width: Some(320), height: Some(180) }
@@ -155,7 +158,7 @@ mod tests {
     }
 }
 
-/// Manual check against real files: `FILTERER_PROBE_DIR=<folder> cargo test -- --ignored --nocapture probe_folder`.
+/// Manual check against real files: `FILTERER_PROBE_DIR=<folder> [FILTERER_FFPROBE=<ffprobe.exe>] cargo test -- --ignored --nocapture probe_folder`.
 #[cfg(test)]
 #[test]
 #[ignore]
@@ -168,7 +171,8 @@ fn probe_folder() {
         .map(|e| e.into_path())
         .collect();
     let started = std::time::Instant::now();
-    for (path, info) in paths.iter().zip(read_many(&paths)) {
+    let ffprobe = std::env::var_os("FILTERER_FFPROBE").map(PathBuf::from);
+    for (path, info) in paths.iter().zip(read_many(&paths, ffprobe.as_deref())) {
         println!("{:?} {:?}", path.file_name().unwrap(), info);
     }
     println!("{} files in {:?}", paths.len(), started.elapsed());

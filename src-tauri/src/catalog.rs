@@ -200,6 +200,8 @@ pub struct MovePlan {
 
 pub struct Workspace {
     pub root: PathBuf,
+    /// ffprobe to read media info with; None uses Windows media properties only.
+    pub ffprobe: Option<PathBuf>,
     meta: PathBuf,
     db: Connection,
     _lock: File,
@@ -231,7 +233,7 @@ impl Workspace {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .readable()?;
-        if version > 3 {
+        if version > 4 {
             return Err("This workspace is not supported by this version.".into());
         }
         db.execute_batch("CREATE TABLE IF NOT EXISTS roots(path TEXT PRIMARY KEY,recursive INTEGER NOT NULL);
@@ -244,6 +246,7 @@ impl Workspace {
             CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,created TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);").readable()?;
         let mut ws = Self {
             root,
+            ffprobe: None,
             meta,
             db,
             _lock: lock,
@@ -254,6 +257,11 @@ impl Workspace {
         }
         if version < 3 {
             ws.migrate_to_3()?;
+        }
+        if version < 4 {
+            ws.db
+                .execute_batch("ALTER TABLE media ADD COLUMN info_reader TEXT; PRAGMA user_version=4;")
+                .readable()?;
         }
         Ok(ws)
     }
@@ -271,15 +279,17 @@ impl Workspace {
         .readable()?;
         tx.commit().readable()
     }
-    /// Reads duration and resolution for videos that are new or changed since they were last read.
+    /// Reads duration and resolution for videos that are new or changed since they were last read,
+    /// or were read by the other reader (installing ffprobe re-reads everything once).
     fn read_media_info(&mut self, cancel: &AtomicBool, progress: &dyn Fn(String)) -> Result<()> {
+        let reader = if self.ffprobe.is_some() { "ffprobe" } else { "windows" };
         let pending: Vec<(i64, PathBuf, i64, i64)> = {
             let mut q = self
                 .db
-                .prepare("SELECT id,path,size,modified FROM media WHERE info_size IS NOT size OR info_modified IS NOT modified")
+                .prepare("SELECT id,path,size,modified FROM media WHERE info_size IS NOT size OR info_modified IS NOT modified OR info_reader IS NOT ?1")
                 .readable()?;
             let rows = q
-                .query_map([], |r| {
+                .query_map([reader], |r| {
                     Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?), r.get(2)?, r.get(3)?))
                 })
                 .readable()?;
@@ -290,12 +300,12 @@ impl Workspace {
             cancelled(cancel)?;
             progress(format!("Reading video info {} / {}", n * BATCH, pending.len()));
             let paths: Vec<PathBuf> = batch.iter().map(|(_, path, _, _)| path.clone()).collect();
-            let infos = media_info::read_many(&paths);
+            let infos = media_info::read_many(&paths, self.ffprobe.as_deref());
             let tx = self.db.transaction().readable()?;
             for ((id, _, size, modified), info) in batch.iter().zip(infos) {
                 tx.execute(
-                    "UPDATE media SET duration_ms=?1,width=?2,height=?3,info_size=?4,info_modified=?5 WHERE id=?6",
-                    params![info.duration_ms, info.width, info.height, size, modified, id],
+                    "UPDATE media SET duration_ms=?1,width=?2,height=?3,info_size=?4,info_modified=?5,info_reader=?6 WHERE id=?7",
+                    params![info.duration_ms, info.width, info.height, size, modified, reader, id],
                 )
                 .readable()?;
             }

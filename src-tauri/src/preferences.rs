@@ -11,12 +11,17 @@ use std::{
 pub struct Preferences {
     pub reopen_last: bool,
     pub last_workspace: Option<PathBuf>,
+    /// ffprobe found or chosen on this computer; checked again on startup.
+    pub ffprobe_path: Option<PathBuf>,
+    pub ffprobe_notice_dismissed: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Preferences {
             reopen_last: true,
             last_workspace: None,
+            ffprobe_path: None,
+            ffprobe_notice_dismissed: false,
         }
     }
 }
@@ -52,6 +57,8 @@ mod tests {
         let saved = Preferences {
             reopen_last: false,
             last_workspace: Some(temp.path().join("workspace")),
+            ffprobe_path: Some(temp.path().join("ffprobe.exe")),
+            ffprobe_notice_dismissed: true,
         };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), saved);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { columnValue, durationText, filename, qualityOf, resolutionText, folderOf, formatOf, localTime, matches, moveKey, moveKeys, ordered, ratingSteps, ratingText, sortedVideos, tagCounts, tagSet, text, toggleTag, type Query, type Rule, type Video } from './model';
+import { columnValue, durationText, filename, qualityOf, resolutionText, folderOf, formatOf, localTime, matches, moveKey, moveKeys, ordered, ratingSteps, ratingText, sortedVideos, filterFirstTags, tagCounts, tagSet, text, toggleTag, type Query, type Rule, type Video } from './model';
 
 const videos: Video[] = [
   { id: 1, path: 'C:\\Sources\\Dragön & 01.mp4', size: 50, values: { '1': ['Dragön', 'Adventure'], '2': 90, '3': '2025-03-01' }, images: [], plays: 0, last_played: null },
@@ -148,5 +148,19 @@ describe('duration and resolution', () => {
     expect(ids({ rules: [{ field: 'resolution', op: 'eq', value: '1080p' }] })).toEqual([1, 2]);
     expect(ids({}, 'duration')).toEqual([2, 4, 1, 3]);
     expect(ids({}, 'resolution', true)).toEqual([4, 1, 2, 3]);
+  });
+});
+describe('filter-first tag order', () => {
+  const tags = ['A', 'B', 'C', 'D', 'E', 'F'];
+  it('puts AND then OR tags first in filter order and keeps the rest', () => {
+    const rule: Rule = { field: 't', op: 'tags', value: { all: ['E', 'C'], any: ['Z', 'F', 'A'], none: ['B'] } };
+    const result = filterFirstTags(tags, rule);
+    expect(result.tags).toEqual(['E', 'C', 'F', 'A', 'B', 'D']);
+    expect([...result.matched]).toEqual(['E', 'C', 'F', 'A']);
+  });
+  it('leaves the order alone without a tag rule and reads legacy rules', () => {
+    expect(filterFirstTags(tags).tags).toEqual(tags);
+    expect(filterFirstTags(tags, { field: 't', op: 'empty' }).matched.size).toBe(0);
+    expect(filterFirstTags(tags, { field: 't', op: 'eq', value: 'D' }).tags.slice(0, 2)).toEqual(['D', 'A']);
   });
 });
